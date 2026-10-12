@@ -1,6 +1,6 @@
 // [INPUT]: 隔离临时目录（含 Windows 精确 MSIX 包族）、脱敏配置、清理事务与当前用户官方原生 CLI 版本路径。
 // [OUTPUT]: 白名单、文件夹范围、配置保留、组织检索、直接删除、快照保护、真实日志次序与原生版本/可丢弃 Node CLI 进程的识别/终止/隔离验证。
-// [POS]: 仅操作测试数据，进程样本由本机编译并握手确认启动，避免重用 Apple 平台二进制，不访问现有 Claude 数据。
+// [POS]: 仅操作测试数据；Windows fixture 显式设为当前用户所有以兼容提升权限的 CI，保留生产所有者检查；外部 Node 参数使用普通绝对路径，不访问现有 Claude 数据。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use super::*;
 
@@ -262,12 +262,37 @@ impl Fixture {
         let pid = std::process::id();
         let p = std::env::temp_dir().join(format!("rf-cleaner-test-{pid}-{id}-{unique}"));
         fs::create_dir(&p).unwrap();
-        Self(fs::canonicalize(p).unwrap())
+        let fixture = Self(fs::canonicalize(p).unwrap());
+        fixture.assert_owned(&fixture.0);
+        fixture
     }
     fn file(&self, name: &str, value: &str) {
         let p = self.0.join(name);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
-        fs::write(p, value).unwrap();
+        fs::write(&p, value).unwrap();
+        // Creating a child does not inherit its parent's owner SID. Set each new
+        // directory and file explicitly without touching ancestors outside this fixture.
+        for path in p.ancestors().take_while(|path| path.starts_with(&self.0)) {
+            self.assert_owned(path);
+        }
+    }
+    fn assert_owned(&self, path: &Path) {
+        #[cfg(windows)]
+        {
+            crate::windows::set_cleaner_fixture_owner(&self.0, path).unwrap_or_else(|error| {
+                panic!(
+                    "Fixture ownership setup failed for {}: {error}",
+                    path.display()
+                )
+            });
+            assert!(
+                crate::windows::owned_by_current_user(path),
+                "Fixture {} must pass the production current-user SID ownership check",
+                path.display()
+            );
+        }
+        #[cfg(not(windows))]
+        let _ = path;
     }
 }
 impl Drop for Fixture {
@@ -663,13 +688,49 @@ fn node_claude_entry_is_identified_and_unrelated_node_is_preserved() {
         "setInterval(()=>{},1000)",
     );
     f.file("other.js", "setInterval(()=>{},1000)");
+    // Node 22's CommonJS entry resolver rejects Windows verbatim (\\?\) paths.
+    // Keep canonical paths for native safety checks; only these child arguments
+    // use conventional absolute paths, including UNC paths when applicable.
+    let node_path = |path: PathBuf| -> PathBuf {
+        #[cfg(windows)]
+        {
+            use std::path::{Component, Prefix};
+            let mut parts = path.components();
+            if let Some(Component::Prefix(prefix)) = parts.next() {
+                let conventional = match prefix.kind() {
+                    Prefix::VerbatimDisk(letter) => {
+                        Some(PathBuf::from(format!("{}:\\", letter as char)))
+                    }
+                    Prefix::VerbatimUNC(server, share) => {
+                        let mut value = std::ffi::OsString::from(r"\\");
+                        value.push(server);
+                        value.push(r"\");
+                        value.push(share);
+                        Some(PathBuf::from(value))
+                    }
+                    _ => None,
+                };
+                if let Some(mut result) = conventional {
+                    for part in parts {
+                        if let Component::Normal(value) = part {
+                            result.push(value);
+                        }
+                    }
+                    return result;
+                }
+            }
+        }
+        path
+    };
     let mut children = Children(vec![
         std::process::Command::new("node")
-            .arg(f.0.join("node_modules/@anthropic-ai/claude-code/cli.js"))
+            .arg(node_path(
+                f.0.join("node_modules/@anthropic-ai/claude-code/cli.js"),
+            ))
             .spawn()
             .unwrap(),
         std::process::Command::new("node")
-            .arg(f.0.join("other.js"))
+            .arg(node_path(f.0.join("other.js")))
             .spawn()
             .unwrap(),
     ]);
@@ -677,6 +738,12 @@ fn node_claude_entry_is_identified_and_unrelated_node_is_preserved() {
     let other = children.0[1].id() as i32;
     let mut target = None;
     for _ in 0..20 {
+        assert!(children.0[0].try_wait().unwrap().is_none(),
+            "Node CLI fixture exited before process detection; check external path compatibility and Node stderr");
+        assert!(
+            children.0[1].try_wait().unwrap().is_none(),
+            "Unrelated Node fixture exited before process detection; check Node stderr"
+        );
         let current = processes().unwrap();
         assert!(!current.iter().any(|p| p.pid == other));
         target = current.into_iter().find(|p| p.pid == pid);

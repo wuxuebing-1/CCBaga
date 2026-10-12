@@ -310,6 +310,66 @@ pub fn owned_by_current_user(path: &Path) -> bool {
         matches
     }
 }
+
+/// Test fixtures must have an explicit user owner: elevated Windows tokens can
+/// default newly created objects to the Administrators group instead. This helper
+/// is absent from production builds and cannot modify paths outside this process's
+/// disposable cleaner fixture directory. It does not change the process token.
+#[cfg(test)]
+pub(crate) fn set_cleaner_fixture_owner(root: &Path, path: &Path) -> Result<(), String> {
+    let temp = std::fs::canonicalize(std::env::temp_dir())
+        .map_err(|e| format!("Cannot resolve test temporary directory: {e}"))?;
+    let prefix = format!("rf-cleaner-test-{}-", std::process::id());
+    if root.parent() != Some(temp.as_path())
+        || !root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        || !path.starts_with(root)
+        || !crate::fs_guard::real_path(path)
+    {
+        return Err("Refusing to set ownership outside a real disposable cleaner fixture.".into());
+    }
+    if owned_by_current_user(path) {
+        return Ok(());
+    }
+    unsafe {
+        let current = token_user(GetCurrentProcess())?;
+        let file = handle(
+            CreateFileW(
+                wide(path).as_ptr(),
+                WRITE_OWNER | READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            ),
+            "open disposable fixture owner",
+        )?;
+        let result = SetSecurityInfo(
+            file.0,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            sid(&current),
+            null_mut(),
+            null(),
+            null(),
+        );
+        if result != 0 {
+            return Err(format!(
+                "Cannot set disposable fixture owner to the current user: {}",
+                std::io::Error::from_raw_os_error(result as i32)
+            ));
+        }
+    }
+    if !owned_by_current_user(path) {
+        return Err(
+            "Disposable fixture still fails the production current-user ownership check.".into(),
+        );
+    }
+    Ok(())
+}
+
 pub fn file_identity(path: &Path) -> Result<(u64, u64), String> {
     unsafe {
         let file = handle(

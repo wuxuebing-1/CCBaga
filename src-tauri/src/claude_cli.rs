@@ -486,24 +486,84 @@ mod windows_tests {
 
     #[test]
     fn windows_timeout_stops_installer_descendants() {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+
+        const TEST: &str = "claude_cli::windows_tests::windows_timeout_stops_installer_descendants";
+        let executable = std::env::current_exe().unwrap();
+        match std::env::var("CC_CLI_TEST_ROLE").as_deref() {
+            Ok("installer") => {
+                // execute() attaches its Job before it writes stdin. This helper
+                // must not create a descendant until that containment is ready.
+                let mut payload = Vec::new();
+                std::io::stdin().read_to_end(&mut payload).unwrap();
+                let mut child = Command::new(executable)
+                    .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                    .env("CC_CLI_TEST_ROLE", "descendant")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .creation_flags(0x08000000)
+                    .spawn()
+                    .unwrap();
+                let _ = child.wait();
+                panic!("The fixture descendant must only exit with its installer Job");
+            }
+            Ok("descendant") => {
+                let ready = std::env::var_os("CC_CLI_TEST_READY").unwrap();
+                fs::write(ready, std::process::id().to_string()).unwrap();
+                loop {
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+            }
+            _ => {}
+        }
+
+        // Use the already-built Rust test executable for both fixture roles:
+        // nested cold PowerShell startup must not consume the timeout under test.
         let fixture = Fixture::new();
-        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        let mut command = Command::new(shell);
-        command.args(["-NoProfile", "-NonInteractive", "-Command", r#"
-            $null = [Console]::In.ReadToEnd()
-            Start-Process -WindowStyle Hidden -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 3; [IO.File]::WriteAllText($env:CC_CLI_SURVIVED, ''unexpected'')')
-            [IO.File]::WriteAllText($env:CC_CLI_STARTED, 'started')
-            Start-Sleep -Seconds 30
-        "#]);
+        let ready = fixture.0.join("descendant-ready");
+        let mut command = Command::new(executable);
         command
-            .env("CC_CLI_STARTED", fixture.0.join("started"))
-            .env("CC_CLI_SURVIVED", fixture.0.join("survived"));
-        assert!(execute(command, Arc::new(Reporter::channel(None)), 2)
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env("CC_CLI_TEST_ROLE", "installer")
+            .env("CC_CLI_TEST_READY", &ready);
+        let began = Instant::now();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let _ = sender.send(execute(command, Arc::new(Reporter::channel(None)), 5));
+        });
+        let pid = loop {
+            if let Ok(text) = fs::read_to_string(&ready) {
+                if let Ok(pid) = text.parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                !runner.is_finished() && began.elapsed() < Duration::from_secs(10),
+                "The Rust fixture descendant did not report readiness before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Keep the process handle across termination, avoiding a recycled-PID
+        // query or a fixed sleep that could pass when the child never started.
+        let handle = unsafe { OpenProcess(0x00100000, 0, pid) }; // SYNCHRONIZE
+        assert!(!handle.is_null(), "Ready fixture process cannot be opened");
+        let descendant = unsafe { OwnedHandle::from_raw_handle(handle) };
+        assert_eq!(
+            unsafe { WaitForSingleObject(descendant.as_raw_handle(), 0) },
+            258, // WAIT_TIMEOUT: the ready descendant is still running.
+        );
+        assert!(receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Installer timeout must return within a bounded deadline")
             .unwrap_err()
             .contains("超时"));
-        assert!(fixture.0.join("started").exists());
-        std::thread::sleep(Duration::from_secs(3));
-        assert!(!fixture.0.join("survived").exists());
+        runner.join().unwrap();
+        assert!(began.elapsed() < Duration::from_secs(15));
+        assert_eq!(
+            unsafe { WaitForSingleObject(descendant.as_raw_handle(), 2000) },
+            0, // WAIT_OBJECT_0: the actual ready descendant was terminated.
+        );
     }
 }
