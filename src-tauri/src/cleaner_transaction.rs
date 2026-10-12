@@ -74,7 +74,7 @@ pub(super) fn perform_items(
                         return Err("配置键发生变化，请重新扫描。".into());
                     }
                     identity(item, root)?;
-                    file_io::atomic_write(path, updated.as_bytes(), meta.permissions().mode())
+                    file_io::atomic_write(path, updated.as_bytes(), meta.permissions())
                 }
             }
         })();

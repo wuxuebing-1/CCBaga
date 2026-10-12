@@ -10,13 +10,13 @@ pub(super) fn validate(path: &Path) -> Result<PathBuf, String> {
         fs::symlink_metadata(path).map_err(|_| "无法读取文件夹；请拖入一个可访问的目录。")?;
     if !path.is_absolute()
         || !meta.is_dir()
-        || meta.file_type().is_symlink()
-        || meta.uid() != unsafe { getuid() }
-        || fs::canonicalize(path).ok().as_deref() != Some(path)
+        || fs_guard::is_link(&meta)
+        || !fs_guard::owned(&path, &meta)
+        || !fs_guard::real_path(path)
     {
         return Err("仅支持当前用户的真实文件夹；不接受文件、链接或其他用户目录。".into());
     }
-    Ok(path.to_path_buf())
+    fs::canonicalize(path).map_err(|_| "无法核验文件夹路径。".into())
 }
 pub(super) fn collect(root: &Path, reporter: &Reporter) -> Result<Scan, String> {
     let root = validate(root)?;
@@ -104,7 +104,7 @@ pub(super) fn collect(root: &Path, reporter: &Reporter) -> Result<Scan, String> 
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            if meta.file_type().is_symlink() || meta.uid() != unsafe { getuid() } {
+            if fs_guard::is_link(&meta) || !fs_guard::owned(&path, &meta) {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();

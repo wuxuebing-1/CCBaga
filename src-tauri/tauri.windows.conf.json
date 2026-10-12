@@ -1,0 +1,57 @@
+{
+  "build": {
+    "beforeBuildCommand": "bun run build && python scripts/package-windows.py"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CCBaga-A",
+        "width": 1040,
+        "height": 820,
+        "minWidth": 760,
+        "minHeight": 640,
+        "decorations": true
+      }
+    ]
+  },
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": {
+      "../browser-runtime/WindowsBrowser/": "browser-runtime/WindowsBrowser/",
+      "../browser-runtime/icons/icon.ico": "browser-runtime/browser.ico",
+      "../LICENSE": "licenses/LICENSE.CCBaga.txt",
+      "../NOTICE.md": "licenses/NOTICE.md",
+      "../skills/ccbaga-network/CLAUDE.md": "network-skill/CLAUDE.md",
+      "../skills/ccbaga-network/providers.json": "network-skill/providers.json",
+      "../skills/ccbaga-network/README.md": "network-skill/README.md",
+      "../skills/ccbaga-network/SKILL.md": "network-skill/SKILL.md",
+      "../skills/ccbaga-network/scripts/CLAUDE.md": "network-skill/scripts/CLAUDE.md",
+      "../skills/ccbaga-network/scripts/network.py": "network-skill/scripts/network.py",
+      "../skills/ccbaga-network/scripts/setup-vps.sh": "network-skill/scripts/setup-vps.sh",
+      "../skills/ccbaga-network/scripts/test_network.py": "network-skill/scripts/test_network.py",
+      "../skills/ccbaga-network/scripts/windows_security.py": "network-skill/scripts/windows_security.py"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English",
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": true,
+        "installerHooks": "../packaging/windows/hooks.nsh"
+      }
+    }
+  }
+}

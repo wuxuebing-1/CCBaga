@@ -1,5 +1,5 @@
 // [INPUT]: 临时样本、指纹参数、固定清理边界与本机 HTTP 限流样本。
-// [OUTPUT]: 模块共用临时目录样本，配置/缓存/链接/地区核验与 HTTP 429 服务备援回归。
+// [OUTPUT]: 模块共用临时目录样本，配置/缓存/链接/Windows junction/地区核验与 HTTP 429 服务备援回归。
 // [POS]: 浏览器模块行为验证；不访问用户实际资料。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use super::*;
@@ -81,7 +81,8 @@ fn cache_isolation_and_direct_delete() {
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn reject_links_and_malformed_preferences() {
+#[cfg(unix)]
+fn reject_links() {
     let root = sample();
     let outside = sample();
     fs::write(outside.join("keep"), b"keep").unwrap();
@@ -89,14 +90,58 @@ fn reject_links_and_malformed_preferences() {
     std::os::unix::fs::symlink(&outside, root.join("Default/Cache")).unwrap();
     assert!(profile::clear(&root, false, |_, _| {}).is_err());
     assert!(outside.join("keep").exists());
+    assert!(server::resource(&root, "Default/Cache/keep").is_none());
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+#[test]
+fn reject_malformed_preferences_and_parent_traversal() {
+    let root = sample();
+    fs::create_dir(root.join("Default")).unwrap();
     let prefs = root.join("Default/Preferences");
     fs::write(&prefs, b"{\"intl\":\"wrong\"}").unwrap();
     assert!(profile::preferences(&root, &Config::default(), &machine()).is_err());
     assert_eq!(fs::read(&prefs).unwrap(), b"{\"intl\":\"wrong\"}");
     assert!(server::resource(&root, "../keep").is_none());
-    assert!(server::resource(&root, "Default/Cache/keep").is_none());
+    assert!(profile::check_path(&root, &root.join("../outside")).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_junction_cannot_redirect_profile_cleanup() {
+    let root = sample();
+    let outside = sample();
+    fs::write(outside.join("keep"), b"keep").unwrap();
+    fs::create_dir(root.join("Default")).unwrap();
+    let link = root.join("Default/Cache");
+    crate::windows::powershell(
+        "New-Item -ItemType Junction -Path $env:CCBAGA_TEST_LINK -Target $env:CCBAGA_TEST_TARGET | Out-Null",
+        &[("CCBAGA_TEST_LINK", &link.to_string_lossy()), ("CCBAGA_TEST_TARGET", &outside.to_string_lossy())],
+    ).unwrap();
+    assert!(profile::check_path(&root, &link.join("keep")).is_err());
+    assert!(profile::clear(&root, false, |_, _| {}).is_err());
+    assert_eq!(fs::read(outside.join("keep")).unwrap(), b"keep");
+    fs::remove_dir(&link).unwrap();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn saved_settings_and_launch_arguments_can_be_replaced_without_backups() {
+    let root = sample();
+    let mut config = Config::default();
+    config::save(&root, &config).unwrap();
+    write_launch_args(&root, &config, &machine(), &root.join("profile"), "148").unwrap();
+    config.seed = 37;
+    config::save(&root, &config).unwrap();
+    write_launch_args(&root, &config, &machine(), &root.join("profile"), "148").unwrap();
+    assert_eq!(config::load(&root).unwrap().seed, 37);
+    assert!(fs::read_to_string(root.join("launch.args"))
+        .unwrap()
+        .contains("--fingerprint=37\n"));
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+    fs::remove_dir_all(root).unwrap();
 }
 #[test]
 fn preferences_preserve_assets_and_block_both_geolocation_modes() {
@@ -266,4 +311,49 @@ fn machine_proxy_credentials_never_leave_native_code() {
     let value = serde_json::to_string(&m).unwrap();
     assert!(!value.contains("private-password"));
     assert!(!value.contains("system_proxy"));
+}
+
+#[test]
+fn windows_hardware_check_requires_real_windows_platform_version_and_cpu() {
+    let mut m = machine();
+    m.platform = "windows".into();
+    m.version = "10.0.26100".into();
+    let args = config::arguments(
+        &Config::default(),
+        &m,
+        Path::new("C:\\profile"),
+        "http://localhost",
+        "148",
+    );
+    assert!(args.contains(&"--fingerprint-platform=windows".into()));
+    assert!(args.contains(&"--fingerprint-platform-version=10.0.26100".into()));
+    let mut report = network::Report {
+        language: "en-US".into(),
+        languages: vec!["en-US".into()],
+        timezone: m.timezone.clone(),
+        platform: "Win32".into(),
+        cores: m.cores,
+        user_agent: "fixture".into(),
+        platform_version: m.version.clone(),
+        browser_version: "148".into(),
+        geolocation: "denied".into(),
+        exit: None,
+        error: String::new(),
+    };
+    let status = |r: &network::Report| {
+        network::checks(&m, &Config::default(), Some(r), None, "148")
+            .into_iter()
+            .find(|c| c.title == "真实设备与 CPU")
+            .unwrap()
+            .status
+    };
+    assert_eq!(status(&report), "ok");
+    report.platform = "MacIntel".into();
+    assert_eq!(status(&report), "mismatch");
+    report.platform = "Win32".into();
+    report.platform_version = "15.0.0".into();
+    assert_eq!(status(&report), "mismatch");
+    report.platform_version = m.version.clone();
+    report.cores += 1;
+    assert_eq!(status(&report), "mismatch");
 }

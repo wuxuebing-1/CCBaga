@@ -7,10 +7,12 @@ import importlib.util
 import json
 import io
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 spec = importlib.util.spec_from_file_location('network', Path(__file__).with_name('network.py'))
@@ -22,6 +24,10 @@ class NetworkTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='ccbaga-skill-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
+
+    def assertPrivate(self, path):
+        with path.open() as stream:
+            n.private_check(stream)
 
     def test_fixed_provider_destinations(self):
         self.assertEqual(n.provider_url('dmit'), 'https://www.dmit.io/aff.php?aff=28800')
@@ -36,10 +42,12 @@ class NetworkTests(unittest.TestCase):
         conf = {'pem':str(pem),'ppk':str(ppk),'pub':str(pub)}
         pem.chmod(0o644)
         with n.Key(conf) as key:
-            self.assertEqual(key.stat().st_mode & 0o777,0o600)
+            self.assertPrivate(key)
             self.assertEqual(key.read_bytes(),pem.read_bytes())
             copy = key
-        self.assertFalse(copy.exists()); self.assertEqual(pem.stat().st_mode & 0o777,0o644)
+        self.assertFalse(copy.exists())
+        if os.name != 'nt':
+            self.assertEqual(pem.stat().st_mode & 0o777,0o644)
         ppk.write_text(f'PuTTY-User-Key-File-3: {algorithm}\nPublic-Lines: 1\nAAAA\n')
         with self.assertRaises(ValueError): n.Key(conf)
         with self.assertRaises(ValueError): n.key_data(None,str(ppk),str(pub))
@@ -53,19 +61,34 @@ class NetworkTests(unittest.TestCase):
         conf = self.config(); path = self.root/'connection.json'
         n.private_write(path,json.dumps(conf)); self.assertEqual(n.read_config(path),conf)
         with self.assertRaises(FileExistsError): n.private_write(path,'overwrite')
-        path.chmod(0o644)
-        with self.assertRaises(ValueError): n.read_config(path)
-        link = self.root/'linked.json'; link.symlink_to(path)
-        with self.assertRaises(ValueError): n.read_config(link)
+        if os.name == 'nt':
+            insecure = self.root/'insecure.json'
+            insecure.write_text(json.dumps(conf))
+            with self.assertRaises(ValueError): n.read_config(insecure)
+        else:
+            path.chmod(0o644)
+            with self.assertRaises(ValueError): n.read_config(path)
         for host in ['-oProxyCommand=id','user@host','host;id','ssh://host','host\nwhoami']:
             self.assertFalse(n.host_valid(host))
         self.assertTrue(n.host_valid('2001:db8::1'))
+
+    def test_linked_config_is_rejected(self):
+        path = self.root/'connection.json'
+        n.private_write(path, json.dumps(self.config()))
+        link = self.root/'linked.json'
+        try:
+            link.symlink_to(path)
+        except OSError as error:
+            if os.name == 'nt' and error.winerror == 1314:
+                self.skipTest('Creating symlinks requires Windows Developer Mode or privilege')
+            raise
+        with self.assertRaises(ValueError): n.read_config(link)
 
     def test_agent_configuration_needs_no_terminal_and_never_prints_secrets(self):
         path = self.root/'private/connection.json'
         n.configure(path, io.StringIO(json.dumps(self.config())))
         self.assertEqual(n.read_config(path), self.config())
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertPrivate(path)
         with self.assertRaises(FileExistsError): n.configure(path, io.StringIO(json.dumps(self.config())))
         for conf in [{}, {**self.config(), 'home_port': 0}, {**self.config(), 'pem': None}]:
             invalid = self.root/'invalid.json'
@@ -82,12 +105,20 @@ class NetworkTests(unittest.TestCase):
     def test_credentials_travel_only_in_quoted_stdin(self):
         conf = self.config(); marker = self.root/'injected'
         conf['home_pass'] = "p'$(touch " + str(marker) + ')'
-        out = n.execute(['/bin/bash','-s'],n.exports(conf)+'printf %s "$HOME_PASS"\n')
-        self.assertEqual(out,conf['home_pass']); self.assertFalse(marker.exists())
+        self.assertIn('export HOME_PASS=' + shlex.quote(conf['home_pass']), n.exports(conf))
+        if os.name != 'nt':
+            out = n.execute(['/bin/bash','-s'],n.exports(conf)+'printf %s "$HOME_PASS"\n')
+            self.assertEqual(out,conf['home_pass'])
+        else:
+            out = n.execute([sys.executable, '-c', 'import sys; sys.stdout.write(sys.stdin.read())'], conf['home_pass'])
+            self.assertEqual(out, conf['home_pass'])
+        self.assertFalse(marker.exists())
         args = n.ssh_args(conf,Path('/tmp/key'),self.root/'connection.json')
         self.assertNotIn(conf['home_pass'],' '.join(args))
         self.assertIn('StrictHostKeyChecking=yes',args)
         self.assertIn('IdentityAgent=none',args)
+        self.assertIn(os.devnull, args)
+        self.assertPrivate(self.root/'known_hosts')
         curl = n.curl_config(conf)
         self.assertIn(json.dumps(conf['home_user']+':'+conf['home_pass']),curl)
 
@@ -96,6 +127,15 @@ class NetworkTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): n.execute([sys.executable,'-c','import time;time.sleep(5)'],timeout=.05)
         output = n.execute([sys.executable,'-c','print("x"*100000,end="")'])
         self.assertEqual(len(output),65536)
+
+    def test_timeout_ends_descendants(self):
+        marker = self.root/'descendant-survived'
+        child = 'import time,pathlib;time.sleep(1);pathlib.Path(' + repr(str(marker)) + ').write_text("unexpected")'
+        parent = 'import subprocess,sys,time;subprocess.Popen([sys.executable,"-c",' + repr(child) + ']);time.sleep(30)'
+        with self.assertRaises(RuntimeError):
+            n.execute([sys.executable, '-c', parent], timeout=.25)
+        time.sleep(1.1)
+        self.assertFalse(marker.exists())
 
     def test_subscription_requires_expected_host_and_complete_success_marker(self):
         link = 'http://example.com:8443/'+'a'*32+'/clash.yaml'

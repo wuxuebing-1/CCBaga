@@ -6,7 +6,7 @@
  */
 import {Button,Tabs,Textarea} from 'cromma-ui';
 import {Server as ServerIcon,HomeDefault as HomeIcon} from 'cromma-ui/pika';
-import {useState} from 'react';
+import {useEffect,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {useI18n} from './i18n';
 import {AppDialog} from './dialog';
@@ -15,13 +15,18 @@ export function VpsPanel() {
     const {t,locale}=useI18n();
     const [selected,setSelected]=useState('generic'), [copied,setCopied]=useState(''), [error,setError]=useState('');
     const [guide,setGuide]=useState<'dmit'|'webshare'|null>(null);
-    const prompt=installationPrompt(selected,locale);
+    const [source,setSource]=useState<string|null>();
+    useEffect(()=>{let live=true;void invoke<string|null>('network_skill_source').then(value=>{if(live)setSource(value);}).catch(e=>{if(live)setError(String(e));});return()=>{live=false;};},[]);
+    const prompt=source===undefined?'':installationPrompt(selected,locale,source);
     async function open(provider:'dmit'|'webshare'|'skill') {
+        if(provider==='skill'&&source){await copy();return;}
+        if(provider==='skill'&&source===undefined)return;
         setError('');
         try { await invoke('network_open_resource',{provider}); }
         catch (e) { setError(String(e)); }
     }
     async function copy() {
+        if(source===undefined)return;
         setError('');
         try { await invoke('copy_result',{text:prompt});setCopied(prompt); }
         catch(e) { setError(String(e)); }
@@ -39,7 +44,7 @@ export function VpsPanel() {
             <Tabs className="coding-tabs" size="small" variant="segmented" value={selected} onValueChange={setSelected} tabs={agents.map(agent=>({value:agent.id,label:<span className="coding-agent"><img src={agent.icon} width={18} height={18} alt=""/>{agent.id==='generic'?t('通用'):agent.name}</span>}))}/>
             <div className="skill-prompt-surface"><div className="skill-prompt-toolbar"><span>{selected==='generic'?t('通用'):agents.find(agent=>agent.id===selected)?.name}</span><span>{locale.toUpperCase()}</span></div>
                 <Textarea id="skill-prompt" aria-labelledby="skill-install-title" readOnly value={prompt} rows={3}/>
-                <div className="skill-prompt-actions"><Button variant="ink" onClick={()=>void copy()}>{copied===prompt?t('已复制'):t('复制提示词')}</Button></div>
+                <div className="skill-prompt-actions"><Button variant="ink" disabled={source===undefined} onClick={()=>void copy()}>{copied===prompt?t('已复制'):t('复制提示词')}</Button></div>
             </div>
         </section>
         <AppDialog open={guide!==null} onOpenChange={value=>{if(!value)setGuide(null);}} title={guide==='dmit'?'DMIT':'Webshare'} width={440} footer={<Button variant="ink" onClick={()=>setGuide(null)}>{t('关闭')}</Button>}>

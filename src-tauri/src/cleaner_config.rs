@@ -8,6 +8,7 @@ pub(super) enum EditKind {
     Account,
     Settings,
     Shell,
+    PowerShell,
     Npm,
     Git,
 }
@@ -15,7 +16,7 @@ fn sensitive_key(key: &str) -> bool {
     matches!(
         key.to_ascii_uppercase().as_str(),
         "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "NO_PROXY" | "CLAUDE_CODE_OAUTH_TOKEN"
-    ) || key.starts_with("ANTHROPIC_")
+    ) || key.to_ascii_uppercase().starts_with("ANTHROPIC_")
 }
 const ACCOUNT_KEYS: &[&str] = &[
     "userID",
@@ -45,6 +46,9 @@ const ACCOUNT_KEYS: &[&str] = &[
 ];
 pub(super) fn transform(text: &str, kind: EditKind) -> Result<(String, Vec<String>), String> {
     let mut names = Vec::new();
+    if matches!(kind, EditKind::PowerShell) && !simple_powershell_script(text) {
+        return Ok((text.into(), names));
+    }
     if matches!(kind, EditKind::Account | EditKind::Settings) {
         let mut data: Value =
             serde_json::from_str(text).map_err(|_| "配置不是有效 JSON，拒绝修改。")?;
@@ -113,6 +117,15 @@ pub(super) fn transform(text: &str, kind: EditKind) -> Result<(String, Vec<Strin
                         && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                         && simple_shell_value(value)
                 }
+                EditKind::PowerShell => {
+                    key.get(..5)
+                        .is_some_and(|p| p.eq_ignore_ascii_case("$env:"))
+                        && sensitive_key(&key[5..])
+                        && key[5..]
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        && simple_powershell_value(value)
+                }
                 EditKind::Npm => {
                     matches!(key.to_ascii_lowercase().as_str(), "proxy" | "https-proxy")
                 }
@@ -130,6 +143,22 @@ pub(super) fn transform(text: &str, kind: EditKind) -> Result<(String, Vec<Strin
     names.sort();
     names.dedup();
     Ok((output, names))
+}
+fn simple_powershell_value(value: &str) -> bool {
+    let value = value.trim();
+    // Accept one single-quoted literal only; interpolation, backticks, pipelines,
+    // block comments and statement separators are deliberately not evaluated.
+    if !value.starts_with('\'') || !value.ends_with('\'') || value.len() < 2 {
+        return false;
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && chars.next() != Some('\'') {
+            return false;
+        }
+    }
+    true
 }
 fn simple_shell_value(value: &str) -> bool {
     let mut quote = None;
@@ -158,6 +187,36 @@ fn simple_shell_value(value: &str) -> bool {
     quote.is_none() && !escaped
 }
 
+fn simple_powershell_script(text: &str) -> bool {
+    // A line inside a here-string, multiline string/comment or script block is
+    // not a standalone assignment. Leave complex profiles intact for review.
+    if text.contains("@'")
+        || text.contains("@\"")
+        || text.contains("<#")
+        || text.contains("#>")
+        || text.contains(['`', '{', '}'])
+    {
+        return false;
+    }
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .all(|line| {
+            let mut quote = None;
+            for ch in line.chars() {
+                if quote.is_none() && ch == '#' {
+                    break;
+                }
+                if matches!(ch, '\'' | '"') {
+                    if quote == Some(ch) {
+                        quote = None;
+                    } else if quote.is_none() {
+                        quote = Some(ch);
+                    }
+                }
+            }
+            quote.is_none()
+        })
+}
 pub(super) fn needs_manual_review(text: &str, kind: EditKind) -> bool {
     match kind {
         EditKind::Shell => text
@@ -172,6 +231,18 @@ pub(super) fn needs_manual_review(text: &str, kind: EditKind) -> bool {
         EditKind::Git => text
             .lines()
             .any(|line| line.trim_start().starts_with("[include")),
+        EditKind::PowerShell => {
+            !simple_powershell_script(text)
+                || text.lines().any(|line| {
+                    line.trim().split_once('=').is_some_and(|(key, value)| {
+                        key.trim()
+                            .get(..5)
+                            .is_some_and(|p| p.eq_ignore_ascii_case("$env:"))
+                            && sensitive_key(&key.trim()[5..])
+                            && !simple_powershell_value(value)
+                    })
+                })
+        }
         _ => false,
     }
 }

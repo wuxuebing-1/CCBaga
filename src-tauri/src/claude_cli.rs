@@ -1,4 +1,4 @@
-// [INPUT]: 内嵌 claude-cli.sh、当前用户登录终端环境、清理事务互斥锁及真实进度通道。
+// [INPUT]: 内嵌 Unix/Windows CLI 脚本、当前用户环境、清理事务互斥锁及真实进度通道。
 // [OUTPUT]: Claude Code CLI 只读安装状态、一键卸载/重装与版本核验，配置和个人资产不在删除范围。
 // [POS]: 本机程序安装边界；白名单动作由原生层限定，进程未退出时拒绝修改，输出不暴露包管理器原始诊断。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -7,16 +7,22 @@ use crate::{
     progress::{Progress, Reporter},
 };
 use serde::Serialize;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    os::unix::process::CommandExt,
     path::PathBuf,
     process::{Command, Stdio},
     sync::Arc,
     time::{Duration, Instant},
 };
 use tauri::{ipc::Channel, Manager};
+#[cfg(unix)]
 const SCRIPT: &str = include_str!("../../scripts/claude-cli.sh");
+#[cfg(windows)]
+const SCRIPT: &str = include_str!("../../scripts/claude-cli.ps1");
 #[derive(Debug, Default, Serialize)]
 pub struct CliStatus {
     method: String,
@@ -24,13 +30,19 @@ pub struct CliStatus {
     version: String,
 }
 fn execute(mut command: Command, log: Arc<Reporter>, seconds: u64) -> Result<CliStatus, String> {
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let mut child = command
-        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| "无法启动 Claude Code 安装任务。")?;
+    // PowerShell waits for stdin EOF; contain the task before sending any code.
+    #[cfg(windows)]
+    let job = windows_job::Job::attach(&mut child)?;
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -81,14 +93,20 @@ fn execute(mut command: Command, log: Arc<Reporter>, seconds: u64) -> Result<Cli
             }
             _ => {
                 // 安装器可能带起 curl/npm；超时结束整个本次子进程组，防止后台继续修改。
+                #[cfg(unix)]
                 unsafe {
                     kill(-(child.id() as i32), 9);
                 }
+                #[cfg(windows)]
+                job.terminate();
                 let _ = child.wait();
                 break Err("Claude Code 安装任务超时，操作可能已部分完成，请重试。".to_string());
             }
         }
     };
+    // An installer must not leave detached descendants holding our pipes open.
+    #[cfg(windows)]
+    drop(job);
     let _ = writer.join();
     let result = output.join().map_err(|_| "Claude Code 安装任务被中断。")?;
     let errors = errors.join().map_err(|_| "Claude Code 安装任务被中断。")?;
@@ -98,6 +116,7 @@ fn execute(mut command: Command, log: Arc<Reporter>, seconds: u64) -> Result<Cli
             line.starts_with("Claude Code ")
                 || line.starts_with("npm ")
                 || line.starts_with("Homebrew ")
+                || line.starts_with("WinGet ")
                 || line.starts_with("无法读取 ")
                 || line.starts_with("发现未识别的 ")
                 || line.starts_with("仍有其他 ")
@@ -111,9 +130,11 @@ fn execute(mut command: Command, log: Arc<Reporter>, seconds: u64) -> Result<Cli
     }
     Ok(result.0)
 }
+#[cfg(unix)]
 extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
 }
+#[cfg(unix)]
 fn command(action: &str) -> Result<Command, String> {
     let root = std::fs::canonicalize(PathBuf::from(
         std::env::var_os("HOME").ok_or("无法定位用户目录。")?,
@@ -125,6 +146,101 @@ fn command(action: &str) -> Result<Command, String> {
         .env("CC_CLI_USER_DIR", root)
         .current_dir("/");
     Ok(command)
+}
+#[cfg(windows)]
+fn command(action: &str) -> Result<Command, String> {
+    let root = PathBuf::from(std::env::var_os("USERPROFILE").ok_or("无法定位用户目录。")?);
+    if !root.is_absolute() || !root.is_dir() {
+        return Err("无法读取用户目录。".into());
+    }
+    let system = PathBuf::from(std::env::var_os("SystemRoot").ok_or("无法定位 Windows。")?);
+    let mut command = Command::new(system.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+        "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); & ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"])
+        .env("CC_CLI_USER_DIR", &root)
+        .env("CC_CLI_ACTION", action)
+        .current_dir(system);
+    Ok(command)
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle, process::Child};
+    type Handle = *mut c_void;
+    #[repr(C)]
+    #[derive(Default)]
+    struct Basic {
+        process_time: i64,
+        job_time: i64,
+        flags: u32,
+        min_working: usize,
+        max_working: usize,
+        active: u32,
+        affinity: usize,
+        priority: u32,
+        scheduling: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Extended {
+        basic: Basic,
+        io: [u64; 6],
+        process_memory: usize,
+        job_memory: usize,
+        peak_process: usize,
+        peak_job: usize,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(attributes: Handle, name: *const u16) -> Handle;
+        fn SetInformationJobObject(
+            job: Handle,
+            class: i32,
+            info: *const c_void,
+            length: u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn TerminateJobObject(job: Handle, code: u32) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+    pub(super) struct Job(Handle);
+    impl Job {
+        pub(super) fn attach(child: &mut Child) -> Result<Self, String> {
+            let job = Self(unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) });
+            let mut limits = Extended::default();
+            limits.basic.flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if job.0.is_null()
+                || unsafe {
+                    SetInformationJobObject(
+                        job.0,
+                        9,
+                        &limits as *const _ as *const c_void,
+                        std::mem::size_of::<Extended>() as u32,
+                    ) == 0
+                        || AssignProcessToJobObject(job.0, child.as_raw_handle()) == 0
+                }
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Claude Code 无法建立安装进程隔离，未开始修改。".into());
+            }
+            Ok(job)
+        }
+        pub(super) fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+    impl Drop for Job {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
 }
 #[tauri::command]
 pub async fn claude_cli_read() -> Result<CliStatus, String> {
@@ -165,7 +281,7 @@ pub async fn claude_cli_manage(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{
@@ -281,5 +397,113 @@ esac
             .unwrap_err()
             .contains("超时"));
         assert!(began.elapsed() < Duration::from_secs(3));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::fs;
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ccbaga-cli-windows-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn command(&self, action: &str) -> Command {
+            let mut command = command(action).unwrap();
+            command
+                .env("CC_CLI_USER_DIR", &self.0)
+                .env("PATH", &self.0)
+                .env_remove("NVM_HOME");
+            command
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn windows_empty_install_and_unsigned_launcher_refusal() {
+        let fixture = Fixture::new();
+        let result = execute(
+            fixture.command("read"),
+            Arc::new(Reporter::channel(None)),
+            30,
+        )
+        .unwrap();
+        assert!(result.method.is_empty());
+        let launcher = fixture.0.join(".local/bin/claude.exe");
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        fs::write(&launcher, "custom executable").unwrap();
+        assert!(execute(
+            fixture.command("uninstall"),
+            Arc::new(Reporter::channel(None)),
+            30
+        )
+        .is_err());
+        assert!(launcher.exists());
+    }
+
+    #[test]
+    fn windows_missing_receipt_and_timeout_are_not_success() {
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut incomplete = Command::new(&shell);
+        incomplete.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::WriteLine('CC_CLI_METHOD=native')",
+        ]);
+        assert!(execute(incomplete, Arc::new(Reporter::channel(None)), 30)
+            .unwrap_err()
+            .contains("不完整"));
+        let mut sleeper = Command::new(shell);
+        sleeper.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 10",
+        ]);
+        let started = Instant::now();
+        assert!(execute(sleeper, Arc::new(Reporter::channel(None)), 0)
+            .unwrap_err()
+            .contains("超时"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn windows_timeout_stops_installer_descendants() {
+        let fixture = Fixture::new();
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut command = Command::new(shell);
+        command.args(["-NoProfile", "-NonInteractive", "-Command", r#"
+            $null = [Console]::In.ReadToEnd()
+            Start-Process -WindowStyle Hidden -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 3; [IO.File]::WriteAllText($env:CC_CLI_SURVIVED, ''unexpected'')')
+            [IO.File]::WriteAllText($env:CC_CLI_STARTED, 'started')
+            Start-Sleep -Seconds 30
+        "#]);
+        command
+            .env("CC_CLI_STARTED", fixture.0.join("started"))
+            .env("CC_CLI_SURVIVED", fixture.0.join("survived"));
+        assert!(execute(command, Arc::new(Reporter::channel(None)), 2)
+            .unwrap_err()
+            .contains("超时"));
+        assert!(fixture.0.join("started").exists());
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(!fixture.0.join("survived").exists());
     }
 }

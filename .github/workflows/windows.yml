@@ -1,0 +1,60 @@
+# Windows fork/development validation; does not publish official upstream releases.
+name: Windows
+on:
+  pull_request:
+  push:
+    branches: [main, windows]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.13
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13'
+      - name: Toolchain and locked dependencies
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup default 1.99.0
+          bun install --frozen-lockfile
+          python scripts/fetch-browser.py
+      - name: Windows regressions and real browser smoke
+        run: |
+          bun run build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          bun test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/test-windows-browser.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python skills/ccbaga-network/scripts/test_network.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -File scripts/test-claude-cli.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/smoke-windows-browser.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build complete Windows installer
+        run: |
+          bun run build:windows
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/test-windows-installer.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/verify-windows-package.py src-tauri/target/release/bundle/nsis
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: CCBaga-Windows-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/SHA256SUMS.txt
+          if-no-files-found: error

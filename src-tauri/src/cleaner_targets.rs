@@ -1,4 +1,4 @@
-// [INPUT]: 当前用户目录、Claude 清理白名单与可选组织编号。
+// [INPUT]: 当前用户目录、Claude 清理白名单（含精确 Windows MSIX 包族数据路径）与可选组织编号。
 // [OUTPUT]: 分类清理目标、受限目录统计及旧组织文件匹配。
 // [POS]: 清理发现边界；不跟随链接，不遍历项目仓库，不读取凭据内容。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -275,9 +275,124 @@ pub(super) fn definitions(root: &Path) -> Vec<Target> {
         }
         // Linux Desktop packages are third-party; do not reset the whole config directory.
     }
+    #[cfg(windows)]
+    windows_targets(root, &mut result);
     result.sort_by(|a, b| a.path.cmp(&b.path));
     result.dedup_by(|a, b| a.path == b.path);
     result
+}
+
+#[cfg(windows)]
+fn windows_data_dir(root: &Path, variable: &str, fallback: &str) -> PathBuf {
+    // Tests and scoped scans never consult another user's actual AppData.
+    if super::home().ok().as_deref() == Some(root) {
+        if let Some(path) = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return if fs_guard::real_path(&path) {
+                fs::canonicalize(&path).unwrap_or(path)
+            } else {
+                path
+            };
+        }
+    }
+    root.join(fallback)
+}
+
+#[cfg(windows)]
+fn windows_desktop_dirs(root: &Path) -> [PathBuf; 2] {
+    [
+        windows_data_dir(root, "APPDATA", "AppData/Roaming").join("Claude"),
+        windows_data_dir(root, "LOCALAPPDATA", "AppData/Local")
+            .join("Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude"),
+    ]
+}
+
+#[cfg(windows)]
+fn windows_targets(root: &Path, result: &mut Vec<Target>) {
+    result.retain(|item| !item.path.starts_with(root.join("Library")));
+    let local = windows_data_dir(root, "LOCALAPPDATA", "AppData/Local");
+    let mut caches = vec![local.join("claude-cli-nodejs")];
+    for desktop in windows_desktop_dirs(root) {
+        for name in [
+            "Cache",
+            "Code Cache",
+            "GPUCache",
+            "DawnCache",
+            "logs",
+            "Crashpad/reports",
+        ] {
+            caches.push(desktop.join(name));
+        }
+    }
+    for path in caches {
+        let mut item = target(
+            root,
+            "",
+            "Claude Windows 缓存",
+            "cache",
+            "safe",
+            "仅移除 Claude 缓存或日志。",
+        );
+        item.path = path;
+        result.push(item);
+    }
+    // Enumerate Electron storage, never delete Claude's entire directory: that
+    // would also remove claude_desktop_config.json, extensions and MCP settings.
+    for desktop in windows_desktop_dirs(root) {
+        for relative in [
+            "Network",
+            "Cookies",
+            "Cookies-journal",
+            "Local Storage",
+            "Session Storage",
+            "IndexedDB",
+            "Service Worker",
+            "WebStorage",
+            "Local State",
+            "Preferences",
+            "ant-did",
+            "ant-device-registry.json",
+        ] {
+            let mut item = target(
+                root,
+                "",
+                "Desktop 登录与本地状态",
+                "desktop",
+                "login",
+                "仅清除本地登录与站点存储；保留 Desktop 配置、MCP 与扩展，不能删除服务端记录。",
+            );
+            item.path = desktop.join(relative);
+            result.push(item);
+        }
+        for relative in ["local_sessions", "conversations"] {
+            let mut item = target(
+                root,
+                "",
+                "Desktop 历史会话",
+                "history",
+                "history",
+                "永久删除所选本地会话；不会删除云端会话。",
+            );
+            item.path = desktop.join(relative);
+            result.push(item);
+        }
+    }
+    for directory in ["Documents/WindowsPowerShell", "Documents/PowerShell"] {
+        for name in ["profile.ps1", "Microsoft.PowerShell_profile.ps1"] {
+            let mut item = target(
+                root,
+                &format!("{directory}/{name}"),
+                "PowerShell 代理与认证配置",
+                "config",
+                "config",
+                "只移除单行、静态环境变量赋值，保留其他命令和动态表达式。",
+            );
+            item.operation = Operation::Edit(config::EditKind::PowerShell);
+            result.push(item);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -311,21 +426,17 @@ pub(super) fn measure(path: &Path) -> (u64, usize, bool, Vec<u8>) {
         };
         hash.update(path.as_os_str().as_encoded_bytes());
         hash.update([0]);
-        for field in [
-            meta.dev(),
-            meta.ino(),
-            meta.mtime() as u64,
-            meta.mtime_nsec() as u64,
-            meta.ctime() as u64,
-            meta.ctime_nsec() as u64,
-            meta.len(),
-        ] {
+        let fingerprint = match stamp(&path, &meta) {
+            Ok(value) => value.0,
+            Err(_) => return (bytes, files, false, hash.finalize().to_vec()),
+        };
+        for field in fingerprint {
             hash.update(field.to_le_bytes());
         }
         if meta.is_file() {
             bytes = bytes.saturating_add(meta.len());
             files += 1;
-        } else if meta.is_dir() && !meta.file_type().is_symlink() {
+        } else if meta.is_dir() && !fs_guard::is_link(&meta) {
             let Ok(entries) = fs::read_dir(&path) else {
                 return (bytes, files, false, hash.finalize().to_vec());
             };
@@ -362,12 +473,21 @@ pub(super) fn org_files(root: &Path, org: &str) -> Result<(Vec<PathBuf>, bool), 
         "Library/Application Support/Claude/local_sessions",
         "Library/Application Support/Claude/conversations",
     ] {
-        if cfg!(target_os = "linux") && relative.starts_with("Library/") {
+        if !cfg!(target_os = "macos") && relative.starts_with("Library/") {
             continue;
         }
         let p = root.join(relative);
-        if fs::canonicalize(&p).ok().as_deref() == Some(p.as_path()) {
+        if fs_guard::real_path(&p) {
             pending.push((p, 0));
+        }
+    }
+    #[cfg(windows)]
+    for desktop in windows_desktop_dirs(root) {
+        for name in ["local_sessions", "conversations"] {
+            let p = desktop.join(name);
+            if fs_guard::real_path(&p) {
+                pending.push((p, 0));
+            }
         }
     }
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -381,7 +501,7 @@ pub(super) fn org_files(root: &Path, org: &str) -> Result<(Vec<PathBuf>, bool), 
             complete = false;
             continue;
         };
-        if meta.uid() != unsafe { getuid() } || meta.file_type().is_symlink() {
+        if !fs_guard::owned(&path, &meta) || fs_guard::is_link(&meta) {
             continue;
         }
         if meta.is_dir() {

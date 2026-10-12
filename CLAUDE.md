@@ -36,3 +36,5 @@ CLI 管理：Claude 清理页提供一键卸载/重装，确认后结束全部�
 安全契约：src-tauri/SECURITY.md 描述数据流与外部连接；进程参数只在原生层识别，Machine.system_proxy 禁止序列化；宿主无用户信息上传服务；验证未覆盖的第三方、桌面或远程行为不得宣称通过。
 Linux x86_64 适配：见 docs/linux.md；平台配置拆分为 tauri.macos.conf.json / tauri.linux.conf.json。Linux 原生边界位于 src-tauri/src/linux.rs，浏览器使用带哈希固定的 LinuxBrowser 与 XDG 启动项；版本任务后并行构建 macOS/Ubuntu/Arch；DEB/RPM/AppImage 引擎隔离在 libexec，避免宿主打包工具改写；Linux 实际安装包均解包核验，四格式与 macOS 同批验收后由所有者统一发布，Linux 不接触 Apple/更新私钥。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
+Windows x64 适配：见 docs/windows.md。保留双应用、白名单快照与真实观测目标；新增 windows.rs 和 fs_guard.rs，Windows 配置仅替换平台构建入口。原生 SID/进程创建标识、文件 ID、重解析点拒绝、Credential Manager 元数据与系统设置核验；按用户 NSIS 内含完整哈希固定 WindowsBrowser。windows.yml 仅测试和产出开发安装包，不改变原官方发布授权。

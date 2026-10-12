@@ -7,12 +7,14 @@ description: Collect user-supplied files and connection details, then handle DMI
 <!--
 [INPUT]: 用户直接提供的服务器地址、密钥附件/文件包与家宽连接资料；AI 负责整理本机私密配置。
 [OUTPUT]: 可验证的购买引导、SSH/出口预检、明确确认后的部署、私密订阅与 TUN 开关流程。
-[POS]: 独立于应用 UI 的 AI 操作协议；执行复用 scripts/network.py 与 setup-vps.sh。
+[POS]: 独立于应用 UI 的 AI 操作协议；macOS/Linux/Windows 本机执行复用 network.py，远端仍为 Debian。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 -->
 # CCBaga network
 
 Act as a patient network engineer. Respond in the user's language, including English when the installation prompt is English. Use the bundled scripts; do not rewrite the deployment from memory. Resolve all script paths relative to this skill's directory, not the current project. Read [README.md](README.md) for installation and CLI commands before starting.
+
+The local agent may run on Windows 10/11 as well as macOS/Linux. On Windows, choose an installed Python 3.10+ interpreter (`py -3` or its absolute path), OpenSSH Client and `curl.exe`; run commands with an argument array and send secret JSON through standard input. The helper creates private files with a protected current-user Windows ACL at creation time and verifies ownership/ACLs before reading. Every mention of “0600” below means that ACL on Windows; `chmod` alone is never sufficient on Windows. Original attachments stay unchanged. Do not replace the Debian remote script with Windows commands, weaken host-key checks, or treat local Windows support as authorization to deploy.
 
 ## Interaction contract
 

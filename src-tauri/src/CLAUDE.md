@@ -18,5 +18,10 @@ cleaner_io.rs: 清理后配置原子写入；临时文件仅保存新内容，�
 cleaner_tests.rs: 临时白名单/快照/日志验证；官方原生版本路径、自编译并经启动握手的可丢弃进程与 Node 样本验证身份、终止与其他 Node 保留；不复制系统平台二进制，不修改用户数据。
 regions.rs: 地区编号到语言、区域格式和代表时区的唯一白名单与目标语言/时区地区匹配；供前端选择与系统/浏览器快捷操作共用，包含目录与本机时区验证。
 linux.rs: Linux procfs 当前用户进程、zoneinfo/timedatectl、GNOME 定位偏好、GNOME/KDE 设置入口与 Wayland/X11 剪贴板；LC_MESSAGES/LC_TIME 分别读取会话语言/区域格式，不匹配时先报手动操作再改时区；未知定位为 null，Linux 钥匙串明确不可用；不将系统代理凭据序列化给 WebView。
+windows.rs: Windows 当前用户 SID、进程创建时间/句柄与大小写无关的精确安装路径识别；覆盖原生与 npm/Bun/WinGet CLI、Squirrel 与受精确发布者包族约束的 MSIX Desktop。文件身份/所有者以不跟随重解析点的句柄核验；凭据仅枚举 Claude 白名单目标元数据，从不解引用凭据正文，删除前核对类型/目标/修改时间。系统 IANA 时区目录读取 Windows 维护的映射；时区、首选语言顺序与区域格式实际设置后核验，保留其他语言和输入法；定位只打开 Settings 并核验机器偏好，显示语言安装/注销由 Windows 管理。剪贴板使用活动应用窗口；原生代理只用于本机出口检测，PAC/WPAD 未解析时阻止静默直连。
 network_links.rs: 固定供应商与 Skill 导航白名单，编译消费 Skill 的 providers.json 组装原始 URL，WebView 不能指定 URL；无密钥访问或 SSH 执行。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
+windows.rs：Windows 原生 SID/句柄进程身份、文件所有权和标识、凭据元数据、系统状态/地区/剪贴板和设置入口；不读取密码或静默修改默认应用。fs_guard.rs：跨平台链接/Windows 目录联接拒绝和保留 ACL 的原子替换；清理沿用快照与用户确认。
+
+network_skill_source：仅返回固定随包 Skill 目录且核验所需文件完整；不读取密钥、不执行安装或部署。

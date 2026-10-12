@@ -28,3 +28,7 @@ network-skill.ts: 五项工具安装目录与运行入口，通用项由当前�
 network-skill.test.ts: 五项工具顺序、目录/调用符与完整双语复制内容回归，拒绝混入网络流程描述。
 Linux 呈现边界：设备平台由原生快照提供；未知定位不显示关闭；系统授权提示不固定 macOS；更新入口在 Linux 明确要求通过包或源码更新，不请求现有 macOS-only 更新源。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
+Windows 呈现边界：browser-verification.ts 与 browser-verification.test.ts 按真实 Windows/其他平台观测判定；清理预览按 Windows 分隔符/盘符处理父子选择；Windows 更新仅提示使用完整安装包。
+
+Windows 网络 Skill 提示词使用 native network_skill_source 返回的随包目录；Windows 不指向尚未移植的上游 Skill，来源读取失败不复制旧提示词。

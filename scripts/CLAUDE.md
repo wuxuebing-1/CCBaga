@@ -25,3 +25,9 @@ release-linux.py: 无 Apple/更新凭据的 x86_64 三格式构建，先运行 S
 test-rpm.py: 临时 DEB 文件树经真实 rpmbuild 转换，回归 RPM 版本/架构、桌面入口与引擎字节，不执行样本程序。
 verify-linux-package.py: Linux 安装包只读载荷契约，供 Ubuntu/Arch 共用，拒绝缺失 UI、入口或被改写的引擎文件/链接。
 build-arch.sh: 固定摘要容器准备 Node.js 等构建/测试依赖，以非 root makepkg、原生回归与解包验收，公开源码与 Cargo 缓存挂载；不接触 macOS 凭据。
+
+package-windows.py：构建前核验固定 Windows 引擎完整清单、PE/版本与双 UI 资源。verify-windows-package.py：7-Zip 只读解开真实 NSIS，比对宿主、完整引擎、UI 和许可并生成 SHA256SUMS。test-windows-browser.py/smoke-windows-browser.py：恶意归档/PE 回归与真实隔离浏览器种子/平台观測。claude-cli.ps1/test-claude-cli.ps1：Windows 原生/npm/WinGet 程序管理和隔离测试。
+
+test-windows-installer.py：实际编译并运行 NSIS 安装/卸载守卫（1024 字符限制），验证完整脚本、64 位 PowerShell、首装/占用/相邻进程以及中文、空格和单引号路径；可丢弃进程保持运行。
+
+Windows 安装验收同时按源文件字节核验随包 Windows 网络 Skill；资源清单排除 Python 临时缓存。

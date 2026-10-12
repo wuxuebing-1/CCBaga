@@ -37,7 +37,7 @@ pub fn ui_language_write(app: tauri::AppHandle, language: String) -> Result<(), 
     let result = (|| -> std::io::Result<()> {
         fs::create_dir_all(&dir)?;
         fs::write(dir.join("ui-language.tmp"), &language)?;
-        fs::rename(dir.join("ui-language.tmp"), dir.join("ui-language"))
+        crate::fs_guard::replace(&dir.join("ui-language.tmp"), &dir.join("ui-language"))
     })();
     if result.is_err() {
         let _ = fs::remove_file(dir.join("ui-language.tmp"));

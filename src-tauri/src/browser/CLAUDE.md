@@ -7,4 +7,5 @@ network.rs: 共用 ipwho.is/ipapi.co 服务目录；经同一指定代理检测�
 server.rs: 随机令牌回环服务，刷新实际机器与界面语言上下文，接收浏览器观测并记录接收时间，CSP 仅放行两个已选出口服务；存活到会话令牌被替换或清空；静态资源限制在打包目录。
 tests.rs: 模块共用临时目录样本，验证代理/资料边界、缓存隔离与地区核验；本机 HTTP 样本复现 429 并核验备援解析，不触碰现有账号数据。
 linux.rs: Linux libexec 隔离引擎（兼容源码/Arch 的资源目录），带双布局路径回归，与宿主驱动的 CCBaga-B 启动项；处理 --browser 链接、同资料重连、显式 xdg-mime 注册并核验 HTTP/HTTPS；定位状态未知的桌面禁止完整机器对齐，修改前停止；Linux UA 不提供内核版本，不用 UA 值伪装内核核验。
+windows.rs: 固定上游 WindowsBrowser/chrome.exe 引擎，CCBaga-B 启动项通过同一宿主 --browser 入口双向启动，外部参数只允许 URL/绝对文件；每次宿主启动重新建立实测页。默认应用按用户注册 CCBaga.Browser 能力后打开 Windows Settings，由用户确认，不改写 UserChoice；回读 HTTP/HTTPS 的真实选择。平台/版本/CPU 实测必须匹配 Windows。共用资料保护拒绝 junction/reparse point，配置覆盖保留 ACL；系统 BCrypt 提供随机会话令牌。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

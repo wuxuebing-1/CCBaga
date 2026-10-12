@@ -1,4 +1,4 @@
-// [INPUT]: macOS Objective-C / Linux Rust 的本地清理、授权与剪贴板接口。
+// [INPUT]: macOS Objective-C / Linux 与 Windows Rust 的本地清理、授权与剪贴板接口。
 // [OUTPUT]: 辅助功能权限、剪贴板复制、钥匙串解锁、脱敏凭据发现与允许系统授权的直接删除。
 // [POS]: 清理与电脑设置的平台桥接边界；公共 JSON 解码供独立 system 桥复用。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -7,6 +7,8 @@ use std::ffi::{c_char, CStr, CString};
 
 #[cfg(target_os = "linux")]
 use crate::linux::*;
+#[cfg(target_os = "windows")]
+use crate::windows::*;
 #[cfg(target_os = "macos")]
 extern "C" {
     fn rf_permissions();
@@ -64,6 +66,10 @@ pub fn claude_pids() -> Result<Vec<i32>, String> {
     decode(unsafe { rf_claude_pids() })
 }
 pub fn permissions() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows::open_settings("location").map(|_| ())
+    }
     #[cfg(target_os = "linux")]
     {
         crate::linux::open_settings("location").map(|_| ())
@@ -79,7 +85,7 @@ pub fn permissions() -> Result<(), String> {
 pub fn copy(text: &str) -> Result<(), String> {
     let text = CString::new(text).map_err(|_| "文本包含无法复制的字符。")?;
     unsafe {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         rf_copy(text.as_ptr())?;
         #[cfg(target_os = "macos")]
         rf_copy(text.as_ptr());

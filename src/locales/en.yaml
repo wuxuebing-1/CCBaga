@@ -751,3 +751,11 @@
 "协议": "Protocol"
 "端口": "Port"
 "以面板为准": "As shown in the dashboard"
+
+"当前平台请通过完整安装包或源码更新；签名自动更新源仅提供官方 macOS 版本。": "Update this platform using the complete installer or source. Signed automatic updates are only available for official macOS releases."
+
+"请在 Windows 设置中关闭定位，返回后刷新核验。": "Turn off location in Windows Settings, then return and refresh to verify."
+
+"Windows 凭据管理器": "Windows Credential Manager"
+
+"请将本机目录 {v0} 中完整的 Windows 兼容网络 Skill 安装到 {v1}，供 {v2} 使用。安装后运行 {v3}，使用中文。": "Install the complete Windows-compatible network Skill from local directory {v0} into {v1} for {v2}. Then run {v3} in English."

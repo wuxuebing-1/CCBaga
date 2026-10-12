@@ -17,8 +17,10 @@ export const agents=[
     {id:'opencode',name:'OpenCode',icon:opencode,directory:'~/.config/opencode/skills/ccbaga-network',invoke:'/ccbaga-network'},
     {id:'copilot',name:'Copilot',icon:copilot,directory:'~/.copilot/skills/ccbaga-network',invoke:'/ccbaga-network'},
 ];
-export function installationPrompt(id:string,locale:Locale):string {
+export function installationPrompt(id:string,locale:Locale,localSource?:string|null):string {
     const agent=agents.find(item=>item.id===id)||agents[0];
+    if(localSource) return translate('请将本机目录 {v0} 中完整的 Windows 兼容网络 Skill 安装到 {v1}，供 {v2} 使用。安装后运行 {v3}，使用中文。',
+        {v0:JSON.stringify(localSource),v1:agent.directory||translate('当前 AI 工具的 Skill 目录',{},locale),v2:agent.id==='generic'?translate('当前 AI 工具',{},locale):agent.name,v3:agent.invoke},locale);
     return translate('请将 {v0} 中完整的 skills/ccbaga-network 安装到 {v1}，供 {v2} 使用。安装后运行 {v3}，使用中文。',
         {v0:'https://github.com/liseami/CCBaga',v1:agent.directory||translate('当前 AI 工具的 Skill 目录',{},locale),v2:agent.id==='generic'?translate('当前 AI 工具',{},locale):agent.name,v3:agent.invoke},locale);
 }

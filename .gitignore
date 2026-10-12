@@ -31,3 +31,6 @@ packaging/arch/ccbaga/
 packaging/arch/*.tar.xz
 packaging/arch/*.tar.xz.part
 packaging/arch/*.pkg.tar.zst
+
+# Windows engine and local build outputs
+browser-runtime/WindowsBrowser/

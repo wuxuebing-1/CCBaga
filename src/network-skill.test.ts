@@ -6,6 +6,16 @@
  */
 import {test,expect} from 'bun:test';
 import {agents,installationPrompt} from './network-skill';
+
+test('Windows 安装提示使用随包兼容 Skill，避免下载未移植的旧版本',()=>{
+    for(const locale of ['zh','en'] as const){
+        const prompt=installationPrompt('codex',locale,'C:\\Users\\Test User\\CCBaga-A\\network-skill');
+        expect(prompt).toContain('network-skill');
+        expect(prompt).toContain('Test User');
+        expect(prompt).toContain('$ccbaga-network');
+        expect(prompt).not.toContain('github.com');
+    }
+});
 test('五项工具只复制正确语言的安装与运行提示词',()=>{
     expect(agents.map(a=>a.id)).toEqual(['generic','codex','cursor','opencode','copilot']);
     for(const agent of agents){

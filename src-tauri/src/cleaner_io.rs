@@ -4,19 +4,30 @@
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use super::*;
 use std::io::Write;
-pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+pub(super) fn atomic_write(
+    path: &Path,
+    bytes: &[u8],
+    permissions: fs::Permissions,
+) -> Result<(), String> {
     let temporary = path.with_file_name(format!(".rf-cleanup-{}", generation()));
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(mode & 0o777)
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            options.mode(permissions.mode() & 0o777);
+        }
+        #[cfg(windows)]
+        let _ = permissions;
+        let mut file = options
             .open(&temporary)
             .map_err(|_| "无法创建配置临时文件。")?;
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| "无法保存完整配置。")?;
-        fs::rename(&temporary, path).map_err(|_| "无法替换配置。")?;
+        drop(file);
+        fs_guard::replace(&temporary, path).map_err(|_| "无法替换配置。")?;
         Ok(())
     })();
     if result.is_err() {
@@ -24,4 +35,5 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), S
     }
     result
 }
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;

@@ -1,10 +1,12 @@
-// [INPUT]: 原生机器快照、独立浏览器配置和实际引擎版本。
+// [INPUT]: macOS/Linux/Windows 原生机器快照、独立浏览器配置和实际引擎版本。
 // [OUTPUT]: Default 资料的指纹设置与 Chromium 参数；默认跟随 TUN 网络，保持真实系统版本、CPU 与设备图形。
 // [POS]: 浏览器配置真相源；路径来自宿主，输入不能变成额外命令参数。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 #[cfg(target_os = "linux")]
 use crate::linux::*;
 use crate::native::decode;
+#[cfg(target_os = "windows")]
+use crate::windows::*;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::ffi::c_char;

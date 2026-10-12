@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# [INPUT]: 本机 0600 JSON、完整三文件密钥、OpenSSH/curl 和本 Skill 部署脚本。
+# [INPUT]: 本机私密 JSON（Unix 0600 / Windows 当前用户 ACL）、完整三文件密钥、OpenSSH/curl 和本 Skill 部署脚本。
 # [OUTPUT]: 分阶段密钥/连接/出口核验、显式部署、私密订阅文件与 TUN 实测。
 # [POS]: Skill 的标准库执行层；AI 收集资料后通过标准输入建私密配置；秘密不进入 argv/公开日志，失败不报告部署成功。
 # [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,27 @@ from urllib.parse import urlencode, urlsplit
 
 SKILL = Path(__file__).resolve().parent.parent
 DEFAULT = Path.home() / '.config/ccbaga-network/connection.json'
+if os.name == 'nt':
+    import windows_security
+
+
+def linked(path):
+    """Reject junctions and other Windows reparse points as well as symlinks."""
+    try:
+        info = path.lstat()
+        return stat.S_ISLNK(info.st_mode) or bool(getattr(info, 'st_file_attributes', 0) & 0x400)
+    except FileNotFoundError:
+        return False
+
+
+def private_check(stream):
+    info = os.fstat(stream.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+        raise ValueError('Config must be a regular private file under 64 KiB')
+    if os.name == 'nt':
+        windows_security.validate_private_fd(stream.fileno())
+    elif info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError('Config must be owned by you and mode 0600')
 
 
 def provider_url(name):
@@ -42,22 +64,20 @@ def host_valid(value):
 def private_write(path, content):
     path = Path(path).expanduser().absolute()
     for parent in [path.parent, *path.parents]:
-        if parent.is_symlink():
+        if linked(parent):
             raise ValueError('Refusing a linked output directory')
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'w') as stream:
+    fd = windows_security.private_fd(path) if os.name == 'nt' else os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
         stream.write(content)
 
 
 def read_config(path):
     path = Path(path).expanduser()
-    if path.is_symlink():
+    if any(linked(p) for p in [path, *path.parents]):
         raise ValueError('Config must be a regular private file')
-    with path.open() as stream:
-        st = os.fstat(stream.fileno())
-        if st.st_uid != os.getuid() or st.st_mode & 0o077 or st.st_size > 65536:
-            raise ValueError('Config must be owned by you, mode 0600, and under 64 KiB')
+    with path.open(encoding='utf-8') as stream:
+        private_check(stream)
         conf = json.load(stream)
     return validate_config(conf)
 
@@ -88,7 +108,7 @@ def key_data(pem, ppk, public):
         path = Path(name).expanduser()
         if path.suffix != suffix or not path.is_file() or not 0 < path.stat().st_size <= 65536:
             raise ValueError('Provide one nonempty PEM/PPK/PUB file, each under 64 KiB')
-        values.append(path.read_text())
+        values.append(path.read_text(encoding='utf-8'))
     private, putty, pub = values
     expected = pub.split()[:2]
     lines = putty.splitlines()
@@ -127,9 +147,13 @@ class Key:
 
 def ssh_args(conf, key, config_path, accept_new=False):
     hosts = Path(config_path).expanduser().absolute().parent / 'known_hosts'
-    if hosts.is_symlink():
+    if any(linked(p) for p in [hosts, *hosts.parents]):
         raise ValueError('Refusing linked known_hosts')
-    return ['ssh', '-F', '/dev/null', '-T', '-p', '22', '-l', 'root',
+    if not hosts.exists():
+        private_write(hosts, '')
+    with hosts.open(encoding='utf-8') as stream:
+        private_check(stream)
+    return ['ssh', '-F', os.devnull, '-T', '-p', '22', '-l', 'root',
             '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none',
             '-o', 'PreferredAuthentications=publickey', '-o', 'PasswordAuthentication=no',
             '-o', 'KbdInteractiveAuthentication=no', '-o', 'StrictHostKeyChecking=' + ('accept-new' if accept_new else 'yes'),
@@ -139,7 +163,10 @@ def ssh_args(conf, key, config_path, accept_new=False):
 
 def execute(command, payload='', timeout=30):
     child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, start_new_session=True)
+                             stderr=subprocess.STDOUT, start_new_session=os.name != 'nt',
+                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    # SSH receives no payload until it is contained in this invocation's job.
+    job = windows_security.Job(child) if os.name == 'nt' else None
     tail = bytearray()
     def read():
         while chunk := child.stdout.read(4096):
@@ -157,13 +184,19 @@ def execute(command, payload='', timeout=30):
     try:
         code = child.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(child.pid, signal.SIGTERM)
-        try:
-            child.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL); child.wait()
+        if job:
+            job.close()
+            child.wait()
+        else:
+            os.killpg(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL); child.wait()
         raise RuntimeError('Task timed out; remote changes may be partial. Do not blindly rerun.')
     finally:
+        if job:
+            job.close()
         reader.join(timeout=2); writer.join(timeout=2)
         child.stdout.close()
     if code:
@@ -309,7 +342,7 @@ def main():
         if args.action == 'deploy':
             wrapper = "umask 077; task=$(mktemp); trap 'rm -f \"$task\"' EXIT; cat > \"$task\"; bash \"$task\""
             output = execute(ssh_args(conf,key,args.config) + ['bash -c ' + shlex.quote(wrapper)],
-                             exports(conf) + (SKILL/'scripts/setup-vps.sh').read_text(), timeout=1800)
+                             exports(conf) + (SKILL/'scripts/setup-vps.sh').read_text(encoding='utf-8'), timeout=1800)
             link = subscription(output,conf['vps'])
             receipt = Path(args.config).expanduser().parent / ('subscription-' + time.strftime('%Y%m%d-%H%M%S') + '.json')
             private_write(receipt,json.dumps({'subscription':link,'expected_exit_ip':conf['expected_ip']})+'\n')

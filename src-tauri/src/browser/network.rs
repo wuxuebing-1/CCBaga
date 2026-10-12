@@ -1,5 +1,5 @@
 // [INPUT]: 显式代理地址、ipwho.is/ipapi.co HTTPS 出口信息与真实浏览器上报。
-// [OUTPUT]: 共用检测服务目录、出口解析与按同一路由切换服务的检测；无上报或失败保持未核验。
+// [OUTPUT]: 共用检测服务目录、出口解析与按同一路由切换服务的检测；严格匹配实际 Windows/macOS/Linux 平台；无上报或失败保持未核验。
 // [POS]: 环境核验边界；只把出口观测当证据，配置值不能冒充实际结果。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use serde::{Deserialize, Serialize};
@@ -228,14 +228,14 @@ pub fn checks(
         check(
             "真实设备与 CPU",
             report.map(|r| {
-                r.platform
-                    .to_lowercase()
-                    .contains(if machine.platform == "linux" {
-                        "linux"
-                    } else {
-                        "mac"
-                    })
-                    && r.cores == machine.cores
+                (match machine.platform.as_str() {
+                    "windows" => {
+                        r.platform == "Win32" || r.platform == "Win64" || r.platform == "Windows"
+                    }
+                    "linux" => r.platform.to_lowercase().contains("linux"),
+                    "macos" => r.platform == "MacIntel" || r.platform == "macOS",
+                    _ => false,
+                }) && r.cores == machine.cores
                     && (machine.platform == "linux" || r.platform_version == machine.version)
             }),
             format!(

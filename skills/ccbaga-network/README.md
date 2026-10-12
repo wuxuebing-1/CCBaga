@@ -1,5 +1,5 @@
 <!--
-[INPUT]: 可安装 Skill 目录、五项 AI 工具的目录与执行命令。
+[INPUT]: 可安装 Skill 目录、五项 AI 工具目录，以及 macOS/Linux/Windows 本机执行命令。
 [OUTPUT]: 英文安装说明、隐私边界和分阶段命令索引。
 [POS]: 网络页 Skill 按钮的公开落点；安装与远端部署分开授权。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -37,6 +37,8 @@ python3 "$HOME/.agents/skills/ccbaga-network/scripts/test_network.py"
 
 The guard preserves an existing installation. Compare/review before replacing existing skill code. Private configuration lives separately under `~/.config/ccbaga-network`; it must never be copied into a Git checkout or skill directory.
 
+On Windows 10/11, the agent can copy the complete directory to `%USERPROFILE%\.agents\skills\ccbaga-network` (or its tool's directory) with PowerShell `Copy-Item -LiteralPath`; it must first check that the destination does not exist. Run the offline tests with `py -3 scripts/test_network.py` using Python 3.10 or newer. Windows OpenSSH Client (`ssh.exe` and `ssh-keygen.exe`) and `curl.exe` are required for real checks. No WSL is required. Keep configuration outside the repository under `%USERPROFILE%\.config\ccbaga-network` or a fresh explicit private path.
+
 [Codex documentation](https://developers.openai.com/codex/skills) · [Cursor documentation](https://cursor.com/docs/skills) · [OpenCode documentation](https://opencode.ai/docs/skills/) · [Copilot documentation](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills)
 
 ## What the AI asks for
@@ -55,7 +57,7 @@ The provider entrance configuration is centralized in [providers.json](providers
 
 ## Agent command reference
 
-**These commands are for the AI, not tasks for the user.** Use Python 3.10+, OpenSSH and curl on macOS/Linux. Run commands relative to the installed skill directory (or use absolute paths):
+**These commands are for the AI, not tasks for the user.** Use Python 3.10+, OpenSSH and curl on macOS/Linux/Windows. On Windows replace `python3` with the selected Python executable or `py -3`. Run commands relative to the installed skill directory (or use absolute paths):
 
 ```sh
 python3 scripts/test_network.py            # offline; no VPS or real credentials
@@ -70,6 +72,8 @@ python3 scripts/network.py tun-check       # actual system exit, bypass proxy en
 ```
 
 `configure` accepts all nine fields on standard input: `vps`, `pem`, `ppk`, `pub`, `home_host`, integer `home_port`, `home_user`, `home_pass`, `expected_ip`. It validates before writing, refuses overwrites and Git/skill destinations, and never prints credentials. `--config /absolute/private/connection.json` selects another private config. SSH is root:22 with the matching PEM; password and Agent authentication are disabled. First identity uses TOFU; compare the provider fingerprint before continuing. Later commands reject unknown/changed host keys.
+
+On Unix, private files are created with mode 0600. On Windows, they receive a protected ACL for the current user before any contents are written; read checks reject other unprivileged users' access. Symlinks and directory junctions are rejected for configuration/output paths. Local timeouts terminate this invocation's process group on Unix or its Windows Job Object and all descendants on Windows. A local timeout does not undo remote changes.
 
 Deployment targets an authorized Debian 12/13 server. It changes system packages, SSH/firewall and Xray services; failures may leave partial changes. The bundled server script keeps root-owned identity state and timestamped backups. It is not a universal installer for existing production servers.
 

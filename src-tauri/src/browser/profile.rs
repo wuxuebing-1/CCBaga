@@ -1,20 +1,20 @@
 // [INPUT]: 宿主独立资料目录、原生进程核验与已验证配置。
-// [OUTPUT]: 浏览资料占用保护、窄范围 Preferences 更新及缓存/登录数据清理。
+// [OUTPUT]: 跨平台浏览资料占用保护、窄范围 Preferences 更新及缓存/登录数据清理，Windows 拒绝 junction/reparse point。
 // [POS]: 文件边界；清理只遍历固定位置，拒绝链接，不生成备份。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+use crate::fs_guard::is_link;
 #[cfg(target_os = "linux")]
 use crate::linux::*;
 use crate::native::decode;
+#[cfg(target_os = "windows")]
+use crate::windows::*;
 use serde::Serialize;
 use serde_json::{json, Value};
 #[cfg(target_os = "macos")]
 use std::ffi::c_char;
-use std::{
-    ffi::CString,
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{ffi::CString, fs, path::Path};
 #[cfg(target_os = "macos")]
 extern "C" {
     fn rf_browser_running(profile: *const c_char) -> *mut c_char;
@@ -28,7 +28,8 @@ pub fn running(profile: &Path) -> Result<bool, String> {
 pub fn quit(profile: &Path) -> Result<(), String> {
     let path = CString::new(profile.to_string_lossy().as_bytes()).map_err(|_| "资料路径无效。")?;
     let _: Value = decode(unsafe { rf_browser_quit(path.as_ptr()) })?;
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         if !running(profile)? {
             return Ok(());
         }
@@ -37,16 +38,20 @@ pub fn quit(profile: &Path) -> Result<(), String> {
     Err("浏览器仍在运行，请保存任务并关闭浏览器窗口。".into())
 }
 pub fn check_path(root: &Path, path: &Path) -> Result<(), String> {
-    if !path.starts_with(root) {
+    if !root.is_absolute()
+        || !path.is_absolute()
+        || !path.starts_with(root)
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
         return Err("路径不在独立浏览资料内。".into());
     }
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err("检测到链接，未修改资料。".into())
-            }
+    // Iterate complete ancestors, not partial Windows Prefix components: a
+    // canonical path starts with \\?\C:, which is not a valid standalone path.
+    for current in path.ancestors().filter(|p| p.parent().is_some()) {
+        match fs::symlink_metadata(current) {
+            Ok(meta) if is_link(&meta) => return Err("检测到链接，未修改资料。".into()),
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err("无法检查浏览资料路径。".into())
             }
@@ -63,9 +68,10 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     check_path(root, &temp)?;
     let data = serde_json::to_vec_pretty(value).map_err(|_| "配置编码失败。")?;
     fs::write(&temp, data).map_err(|_| "配置写入失败。")?;
+    #[cfg(unix)]
     fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))
         .map_err(|_| "配置权限设置失败。")?;
-    if fs::rename(&temp, path).is_err() {
+    if crate::fs_guard::replace(&temp, path).is_err() {
         let _ = fs::remove_file(&temp);
         return Err("配置保存失败。".into());
     }
@@ -144,7 +150,7 @@ pub const SITE_DATA: &[&str] = &[
 ];
 fn size(path: &Path) -> Result<u64, String> {
     let meta = fs::symlink_metadata(path).map_err(|_| "无法读取缓存项目。")?;
-    if meta.file_type().is_symlink() {
+    if is_link(&meta) {
         return Err("缓存中包含链接，已停止。".into());
     }
     if meta.is_file() {

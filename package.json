@@ -9,7 +9,9 @@
     "tauri": "tauri",
     "test": "bun test",
     "install:apps": "sh scripts/install-apps.sh",
-    "dev:install": "python3 scripts/dev-install.py"
+    "dev:install": "python3 scripts/dev-install.py",
+    "dev:windows": "tauri dev",
+    "build:windows": "tauri build --bundles nsis --features custom-protocol"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

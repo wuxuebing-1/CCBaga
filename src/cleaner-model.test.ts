@@ -36,3 +36,12 @@ test('结束进程后的新快照按原路径恢复选择，不扩大到新项�
  const next=[item('new-cache','/home/Claude/Cache','safe'),item('new-desktop','/home/Claude','login'),item('new-data','/home/extra','login')];
  expect(reselectIds(samples,['cache'],next)).toEqual(['new-cache']);
 });
+test('Windows 父子目录使用反斜杠并保留相邻目录',()=>{
+  const items=[
+    {id:'parent',path:'C:\\Users\\test\\AppData\\Roaming\\Claude\\Cache'},
+    {id:'child',path:'c:\\users\\test\\AppData\\Roaming\\Claude\\Cache\\data'},
+    {id:'neighbor',path:'C:\\Users\\test\\AppData\\Roaming\\Claude\\CacheOther'},
+  ] as Item[];
+  expect(effectiveItems(items,['parent','child','neighbor']).map(x=>x.id)).toEqual(['parent','neighbor']);
+  expect(deselectItems(items,['parent','child','neighbor'],['child'])).toEqual(['neighbor']);
+});

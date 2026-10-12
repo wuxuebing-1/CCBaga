@@ -1,4 +1,4 @@
-// [INPUT]: 本机指纹引擎（优先 /Applications/CCBaga-B.app，回退 ~/Applications）、配置/资料边界、真实浏览器观测、宿主界面语言与共享操作日志。
+// [INPUT]: 各平台独立指纹引擎、配置/资料边界、真实浏览器观测、宿主界面语言与共享操作日志。
 // [OUTPUT]: 浏览器设置/启动/清理与环境核验；宿主重启重新连接现有浏览器，回报时间明确标识通讯状态；上下文提供当前界面语言；launch.args 共用资料与指纹参数。
 // [POS]: 独立浏览器模块的唯一编排入口；改变资料前必须退出浏览器；不自行改系统默认浏览器，只发起系统确认。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -7,11 +7,15 @@ mod network;
 mod profile;
 #[cfg(target_os = "linux")]
 include!("linux.rs");
+#[cfg(target_os = "windows")]
+include!("windows.rs");
 pub(crate) mod server;
 #[cfg(test)]
 mod tests;
 #[cfg(target_os = "linux")]
 use crate::linux::*;
+#[cfg(target_os = "windows")]
+use crate::windows::*;
 use crate::{
     native::decode,
     progress::{Progress, Reporter},
@@ -125,22 +129,27 @@ fn write_launch_args(
     profile: &Path,
     version: &str,
 ) -> Result<(), String> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
     let mut args = config::arguments(config, machine, profile, "", version);
     args.pop();
     fs::create_dir_all(root).map_err(|_| "无法创建浏览器目录。")?;
     let target = root.join("launch.args");
     let temp = root.join("launch.args.tmp");
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
+    profile::check_path(root, &target)?;
+    profile::check_path(root, &temp)?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(&temp)
         .map_err(|_| "无法写入浏览器启动参数。")?;
     file.write_all((args.join("\n") + "\n").as_bytes())
         .map_err(|_| "无法写入浏览器启动参数。")?;
-    fs::rename(&temp, &target).map_err(|_| "无法写入浏览器启动参数。")?;
+    drop(file);
+    crate::fs_guard::replace(&temp, &target).map_err(|_| "无法写入浏览器启动参数。")?;
     Ok(())
 }
 fn refresh_launch_args(app: &tauri::AppHandle) -> Result<(), String> {
@@ -166,7 +175,9 @@ fn open_session(
     machine: &Machine,
     engine_version: String,
 ) -> Result<String, String> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
     let state = app.state::<Browser>();
     let listener = server::bind()?;
     let port = listener
@@ -193,16 +204,17 @@ fn open_session(
     let root = root(app)?;
     fs::create_dir_all(&root).map_err(|_| "无法创建浏览器目录。")?;
     let temp = root.join("start.url.tmp");
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|_| "无法写入起始页地址。")?;
+    profile::check_path(&root, &temp)?;
+    profile::check_path(&root, &root.join("start.url"))?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temp).map_err(|_| "无法写入起始页地址。")?;
     file.write_all(format!("{page}\n").as_bytes())
         .map_err(|_| "无法写入起始页地址。")?;
-    fs::rename(&temp, root.join("start.url")).map_err(|_| "无法写入起始页地址。")?;
+    drop(file);
+    crate::fs_guard::replace(&temp, &root.join("start.url")).map_err(|_| "无法写入起始页地址。")?;
     Ok(page)
 }
 /// 资料或配置变化使旧会话失效后，立即换新会话，保证 start.url 始终指向存活的起始页服务。
@@ -435,7 +447,7 @@ fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, String> {
         region: crate::regions::matching(&config.language(&machine), &config.timezone(&machine)),
         config,
         machine,
-        engine_ready: !engine_version.is_empty(),
+        engine_ready: binary(&engine).is_file() && !engine_version.is_empty(),
         engine_version,
         running,
         profile: profile.to_string_lossy().into(),
@@ -536,7 +548,8 @@ pub async fn browser_launch(
             .stderr(file)
             .spawn()
             .map_err(|_| "浏览器启动失败。")?;
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             if profile::running(&profile)? {
                 log.log(
                     "browser",
@@ -665,11 +678,14 @@ pub async fn browser_align(
         if !machine.timezones.contains(&exit.timezone) {
             return Err("出口未返回可用时区，未修改机器。".into());
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             if machine.location_enabled.is_none() {
-                return Err("Linux location state is unknown on this desktop; full machine alignment cannot be verified. No system settings were changed.".into());
+                return Err("Location state is unknown on this computer; full machine alignment cannot be verified. No system settings were changed.".into());
             }
+        }
+        #[cfg(target_os = "linux")]
+        {
             let _: serde_json::Value = decode(unsafe {
                 rf_system_region(b"en-US\0".as_ptr().cast(), b"en_US\0".as_ptr().cast())
             })?;

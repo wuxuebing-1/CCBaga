@@ -1,5 +1,5 @@
 // [INPUT]: 打包的起始页、一次启动的随机令牌、机器上下文、共享界面语言、共用出口服务目录和浏览器实测。
-// [OUTPUT]: 仅 127.0.0.1 的起始页、实时机器/界面语言上下文与带接收时间的观测接口；资源限定在打包目录；服务存活到会话令牌被替换或清空。
+// [OUTPUT]: 仅 127.0.0.1 的起始页、实时机器/界面语言上下文与带接收时间的观测接口；跨平台系统安全随机令牌；资源限定在打包目录。
 // [POS]: Chromium 与工具箱之间的窄桥；不提供文件写入、脚本执行或 Tauri 命令。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use super::{network::Report, Browser, Context};
@@ -17,9 +17,34 @@ fn answer(stream: &mut TcpStream, status: &str, kind: &str, body: &[u8]) {
 }
 pub fn nonce() -> Result<String, String> {
     let mut bytes = [0u8; 24];
+    #[cfg(unix)]
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
         .map_err(|_| "无法创建本地会话令牌。")?;
+    #[cfg(windows)]
+    {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                algorithm: *mut std::ffi::c_void,
+                buffer: *mut u8,
+                length: u32,
+                flags: u32,
+            ) -> i32;
+        }
+        // BCRYPT_USE_SYSTEM_PREFERRED_RNG; no predictable fallback is permitted.
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u32,
+                2,
+            )
+        };
+        if status < 0 {
+            return Err("无法创建本地会话令牌。".into());
+        }
+    }
     Ok(bytes.iter().map(|x| format!("{x:02x}")).collect())
 }
 pub fn bind() -> Result<TcpListener, String> {
@@ -103,7 +128,10 @@ fn handle(
     let method = words.next().unwrap_or("");
     let url = words.next().unwrap_or("");
     let prefix = format!("/{token}/");
-    let Some(path)=url.strip_prefix(&prefix) else{answer(stream,"404 Not Found","text/plain",b"Not found");return;};
+    let Some(path) = url.strip_prefix(&prefix) else {
+        answer(stream, "404 Not Found", "text/plain", b"Not found");
+        return;
+    };
     if method == "GET" && path == "context" {
         let mut current = context.clone();
         current.ui_language = crate::ui_language::ui_language_read(app.clone());
@@ -138,7 +166,10 @@ fn handle(
             .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
             .and_then(|(_, v)| v.trim().parse::<usize>().ok())
             .filter(|n| *n > 0 && *n <= 16_384);
-        let Some(length)=length else{answer(stream,"400 Bad Request","text/plain",b"Invalid length");return;};
+        let Some(length) = length else {
+            answer(stream, "400 Bad Request", "text/plain", b"Invalid length");
+            return;
+        };
         let mut body = vec![0u8; length];
         if stream.read_exact(&mut body).is_err() {
             return;
@@ -146,7 +177,10 @@ fn handle(
         let report = serde_json::from_slice::<Report>(&body)
             .ok()
             .filter(Report::valid);
-        let Some(report)=report else{answer(stream,"400 Bad Request","text/plain",b"Invalid report");return;};
+        let Some(report) = report else {
+            answer(stream, "400 Bad Request", "text/plain", b"Invalid report");
+            return;
+        };
         let state = app.state::<Browser>();
         let mut session = state.session.lock().unwrap();
         if let Some(state) = session.as_mut().filter(|x| x.token == token) {
@@ -171,7 +205,10 @@ fn handle(
         );
         return;
     }
-    let Some(path)=resource(root,path) else{answer(stream,"404 Not Found","text/plain",b"Not found");return;};
+    let Some(path) = resource(root, path) else {
+        answer(stream, "404 Not Found", "text/plain", b"Not found");
+        return;
+    };
     let kind = match path.extension().and_then(|x| x.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "js" => "text/javascript",

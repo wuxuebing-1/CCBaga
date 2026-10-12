@@ -1,8 +1,189 @@
-// [INPUT]: 隔离临时目录、脱敏配置、清理事务与当前用户官方原生 CLI 版本路径。
+// [INPUT]: 隔离临时目录（含 Windows 精确 MSIX 包族）、脱敏配置、清理事务与当前用户官方原生 CLI 版本路径。
 // [OUTPUT]: 白名单、文件夹范围、配置保留、组织检索、直接删除、快照保护、真实日志次序与原生版本/可丢弃 Node CLI 进程的识别/终止/隔离验证。
 // [POS]: 仅操作测试数据，进程样本由本机编译并握手确认启动，避免重用 Apple 平台二进制，不访问现有 Claude 数据。
 // [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 use super::*;
+
+#[cfg(windows)]
+#[test]
+fn windows_msix_cleanup_uses_exact_package_and_preserves_configuration() {
+    let f = Fixture::new();
+    let desktop = "AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude";
+    for (name, text) in [
+        ("Cache/data", "cache"),
+        ("Network/Cookies", "login"),
+        (
+            "local_sessions/session.json",
+            r#"{"organization":"org-fixture123"}"#,
+        ),
+        (
+            "conversations/chat.json",
+            r#"{"organization":"org-fixture123"}"#,
+        ),
+        ("claude_desktop_config.json", "MCP settings must stay"),
+        ("Claude Extensions/keep", "extension must stay"),
+    ] {
+        f.file(&format!("{desktop}/{name}"), text);
+    }
+    let neighbor = "AppData/Local/Packages/Claude_unrelated/LocalCache/Roaming/Claude/local_sessions/keep.json";
+    f.file(neighbor, r#"{"organization":"org-fixture123"}"#);
+    let (matches, complete) = targets::org_files(&f.0, "org-fixture123").unwrap();
+    assert!(complete);
+    assert_eq!(matches.len(), 2);
+    assert!(matches.iter().all(|p| p.starts_with(f.0.join(desktop))));
+    let plan = collect(&f.0, None).unwrap();
+    assert_eq!(plan.items.len(), 4);
+    assert_eq!(
+        plan.items
+            .iter()
+            .filter(|item| item.group == "history")
+            .count(),
+        2
+    );
+    let result = perform_items(
+        &f.0,
+        &plan.items,
+        &Cleaner::default(),
+        || Ok(false),
+        &Reporter::channel(None),
+    )
+    .unwrap();
+    assert!(result.completed, "{:?}", result.errors);
+    for name in ["Cache", "Network", "local_sessions", "conversations"] {
+        assert!(!f.0.join(desktop).join(name).exists());
+    }
+    for name in ["claude_desktop_config.json", "Claude Extensions/keep"] {
+        assert!(f.0.join(desktop).join(name).exists());
+    }
+    assert!(f.0.join(neighbor).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_cleanup_preserves_mcp_skills_and_outside_data() {
+    let f = Fixture::new();
+    for (path, text) in [
+        ("AppData/Roaming/Claude/Cache/data", "cache"),
+        ("AppData/Roaming/Claude/Network/Cookies", "login"),
+        (
+            "AppData/Roaming/Claude/claude_desktop_config.json",
+            "MCP settings",
+        ),
+        ("AppData/Roaming/Claude/Claude Extensions/keep", "extension"),
+        (".claude/skills/keep/SKILL.md", "skill"),
+        (
+            ".claude/settings.json",
+            r#"{"env":{"HTTPS_PROXY":"secret"},"mcpServers":{"keep":{}},"permissions":{"allow":["Read"]}}"#,
+        ),
+        (".claude/backups/settings.old", "old"),
+        ("project/source.ts", "source"),
+    ] {
+        f.file(path, text);
+    }
+    let scan = collect(&f.0, None).unwrap();
+    assert_eq!(scan.items.len(), 4);
+    let result = perform_items(
+        &f.0,
+        &scan.items,
+        &Cleaner::default(),
+        || Ok(false),
+        &Reporter::channel(None),
+    )
+    .unwrap();
+    assert!(result.completed, "{:?}", result.errors);
+    for path in [
+        "AppData/Roaming/Claude/claude_desktop_config.json",
+        "AppData/Roaming/Claude/Claude Extensions/keep",
+        ".claude/skills/keep/SKILL.md",
+        "project/source.ts",
+    ] {
+        assert!(f.0.join(path).exists(), "{path}");
+    }
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(f.0.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert!(settings["env"].get("HTTPS_PROXY").is_none());
+    assert!(settings["mcpServers"]["keep"].is_object());
+    assert_eq!(settings["permissions"]["allow"][0], "Read");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_junction_cannot_redirect_a_scan_or_stale_transaction() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    outside.file("cache/data", "must stay");
+    let junction = f.0.join(".claude");
+    let status = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&outside.0)
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert!(collect(&f.0, None).unwrap().items.is_empty());
+    assert!(folder::validate(&junction).is_err());
+    assert!(folder::validate(&junction.join("cache")).is_err());
+    fs::remove_dir(&junction).unwrap();
+    f.file(".claude/cache/data", "inside");
+    let scan = collect(&f.0, None).unwrap();
+    fs::rename(f.0.join(".claude"), f.0.join("old-claude")).unwrap();
+    assert!(std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&outside.0)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(perform_items(
+        &f.0,
+        &scan.items,
+        &Cleaner::default(),
+        || Ok(false),
+        &Reporter::channel(None)
+    )
+    .is_err());
+    assert_eq!(
+        fs::read_to_string(outside.0.join("cache/data")).unwrap(),
+        "must stay"
+    );
+    fs::remove_dir(junction).unwrap();
+}
+
+#[test]
+fn powershell_cleanup_does_not_evaluate_or_remove_compound_commands() {
+    let source = "$env:HTTPS_PROXY = 'secret'\r\n$env:ANTHROPIC_API_KEY = 'value'; Write-Host keep\r\n$env:KEEP = 'yes'\r\n$env:ALL_PROXY = $(Get-Secret)\r\n";
+    let (updated, keys) = config::transform(source, config::EditKind::PowerShell).unwrap();
+    assert_eq!(keys, vec!["$env:HTTPS_PROXY"]);
+    assert!(!updated.contains("'secret'"));
+    assert!(updated.contains("Write-Host keep"));
+    assert!(updated.contains("Get-Secret"));
+    assert!(updated.contains("$env:KEEP = 'yes'\r\n"));
+    assert!(config::needs_manual_review(
+        source,
+        config::EditKind::PowerShell
+    ));
+    for complex in [
+        "$text = @'\n$env:HTTPS_PROXY = 'example'\n'@",
+        "<#\n$env:HTTPS_PROXY = 'example'\n#>",
+        "$text = '\n$env:HTTPS_PROXY = ''example''\n'",
+        "function Run {\n$env:HTTPS_PROXY = 'inside'\n}",
+    ] {
+        let (updated, names) = config::transform(complex, config::EditKind::PowerShell).unwrap();
+        assert_eq!(updated, complex);
+        assert!(names.is_empty());
+        assert!(config::needs_manual_review(
+            complex,
+            config::EditKind::PowerShell
+        ));
+    }
+}
+#[cfg(unix)]
 #[test]
 fn folder_scope_preserves_project_assets_and_refuses_outside_targets() {
     let f = Fixture::new();
@@ -125,6 +306,7 @@ fn discovers_supported_data_and_preserves_personal_assets() {
         "keep"
     );
 }
+#[cfg(unix)]
 #[test]
 fn ignores_linked_targets() {
     let f = Fixture::new();
@@ -150,6 +332,7 @@ fn rejects_stale_or_unknown_targets() {
     f.file(".claude.json", r#"{"userID":"old"}"#);
     assert!(identity(i, &f.0).is_err());
 }
+#[cfg(unix)]
 #[test]
 fn matches_only_current_user_and_exact_claude_processes() {
     let root = home().unwrap();
@@ -195,6 +378,7 @@ fn matches_only_current_user_and_exact_claude_processes() {
         "Claude Code"
     );
 }
+#[cfg(unix)]
 #[test]
 fn ends_only_the_captured_disposable_process() {
     let f = Fixture::new();
@@ -305,6 +489,7 @@ fn shell_and_git_cleanups_do_not_remove_unrelated_commands() {
     assert!(updated.contains("sslVerify = true"));
     assert!(updated.contains("proxy = keep"));
 }
+#[cfg(unix)]
 #[test]
 fn organization_search_stays_in_claude_sessions_and_does_not_follow_links() {
     let f = Fixture::new();
@@ -325,6 +510,7 @@ fn organization_search_stays_in_claude_sessions_and_does_not_follow_links() {
     assert!(files[0].ends_with("match.jsonl"));
     assert!(targets::org_files(&f.0, "../source").is_err());
 }
+#[cfg(unix)]
 #[test]
 fn direct_cleanup_removes_selected_data_and_backups_without_copies() {
     let f = Fixture::new();
