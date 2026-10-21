@@ -1,0 +1,82 @@
+# Read-only comparison of existing binaries; never rebuild or publish.
+name: Windows release provenance
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        required: true
+        default: v0.2.0-windows.1
+      run_id:
+        description: Successful Windows build run ID
+        required: true
+        default: '38224529893'
+      artifact_id:
+        description: Artifact ID from that run
+        required: true
+        default: '11737001917'
+      asset:
+        description: Exact installer asset filename
+        required: true
+        default: CCBaga-A_0.2.0_x64-setup.exe
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      RUN_ID: ${{ inputs.run_id }}
+      ARTIFACT_ID: ${{ inputs.artifact_id }}
+      ASSET: ${{ inputs.asset }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Fetch exact assets and validate source metadata
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, subprocess, urllib.parse
+          repo, tag, run_id, artifact_id, asset = [os.environ[k] for k in ('REPO','TAG','RUN_ID','ARTIFACT_ID','ASSET')]
+          if not run_id.isdecimal() or not artifact_id.isdecimal():
+              raise SystemExit('IDs must be numeric')
+          if pathlib.Path(asset).name != asset or not asset.endswith('.exe'):
+              raise SystemExit('Invalid installer filename')
+          def api(path):
+              return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}']))
+          run = api(f'actions/runs/{run_id}')
+          artifact = api(f'actions/artifacts/{artifact_id}')
+          release = api('releases/tags/' + urllib.parse.quote(tag, safe=''))
+          commit = api('commits/' + urllib.parse.quote(tag, safe=''))
+          if run['conclusion'] != 'success' or run['status'] != 'completed' or run['path'] != '.github/workflows/windows.yml':
+              raise SystemExit('Expected a completed successful Windows build')
+          if run['head_repository']['full_name'] != repo or run['head_sha'] != commit['sha']:
+              raise SystemExit('Release tag and build source do not match')
+          if artifact['expired'] or artifact['name'] != 'CCBaga-Windows-x64' or artifact['workflow_run']['id'] != int(run_id) or artifact['workflow_run']['head_sha'] != run['head_sha']:
+              raise SystemExit('Artifact does not belong to the selected source/run')
+          assets = [a for a in release['assets'] if a['name'] == asset and a['state'] == 'uploaded']
+          if release['draft'] or len(assets) != 1:
+              raise SystemExit('Expected one publicly released installer')
+          pathlib.Path('evidence').mkdir()
+          pathlib.Path('evidence/source.json').write_text(json.dumps({'run':run,'artifact':artifact,'release':release,'tag_commit':commit['sha']}, indent=2))
+          for endpoint, filename, expected in [(f"releases/assets/{assets[0]['id']}",'release.exe',assets[0].get('digest')), (f'actions/artifacts/{artifact_id}/zip','ci.zip',artifact.get('digest'))]:
+              target = pathlib.Path('evidence') / filename
+              with target.open('wb') as output:
+                  subprocess.run(['gh','api','-H','Accept: application/octet-stream',f'repos/{repo}/{endpoint}'],stdout=output,check=True)
+              with target.open('rb') as stream:
+                  actual = 'sha256:' + hashlib.file_digest(stream,'sha256').hexdigest()
+              if expected and actual != expected:
+                  raise SystemExit('Downloaded bytes differ from GitHub metadata: ' + filename)
+      - name: Compare installer bytes
+        run: python scripts/compare-windows-release.py --release evidence/release.exe --artifact evidence/ci.zip --asset-name "$ASSET" --output evidence/comparison.json
+      - name: Retain comparison evidence even on mismatch
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Windows-release-comparison
+          path: evidence/*.json
+          if-no-files-found: error
