@@ -38,3 +38,5 @@ Linux x86_64 适配：见 docs/linux.md；平台配置拆分为 tauri.macos.conf
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 
 Windows x64 适配：见 docs/windows.md。保留双应用、白名单快照与真实观测目标；新增 windows.rs 和 fs_guard.rs，Windows 配置仅替换平台构建入口。原生 SID/进程创建标识、文件 ID、重解析点拒绝、Credential Manager 元数据与系统设置核验；按用户 NSIS 内含完整哈希固定 WindowsBrowser。windows.yml 仅测试和产出开发安装包，不改变原官方发布授权。
+
+Windows 发布来源：见 docs/windows-release-provenance.md；只读比较公开 EXE 与成功 CI 原始 Artifact 中安装包，失败保留证据。载荷验证后记录 build-provenance.json，不代替 Windows 实机验收。

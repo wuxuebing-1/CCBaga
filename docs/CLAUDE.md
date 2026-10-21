@@ -10,3 +10,5 @@ linux.md: Linux/Arch x86_64 构建依赖、原生 pacman 包与三种 Tauri 包�
 windows.md：Windows x64 社区预发布 v0.2.0-windows.1 的唯一安装包与标签源码下载、中文快速开始、手动升级、核心能力对照和源码构建；保留上游署名、MIT 与 macOS/Linux 实现，区分实际 Windows 11 安装和待验收的干净 Windows 10。
 windows-validation.md：固定发布标签和修正版安装包摘要、本地测试、真实 Windows 11 安装/文件/快捷方式核验及未执行的目标环境验收；不宣称上游官方发布或真实 VPS/TUN 已部署。
 windows-pr7-review.md：固定提交的上游 Windows PR 静态复用评估；按源码证据记录直接采用的阻碍。
+
+windows-release-provenance.md：历史公开 EXE 与 CI 安装包不一致的实测摘要、载荷差异、构建边界及本地/Actions 复验方法。

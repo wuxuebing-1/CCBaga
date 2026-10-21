@@ -4,3 +4,5 @@ release.yml: 仅 liseami 在 liseami/CCBaga 的 release push/手动触发及重�
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 
 windows.yml：Windows PR/push/手动测试与 NSIS 开发产物，GitHub 只读权限、不使用签名密钥、不自动发布 Release；原 release.yml 的官方权限不变。
+
+windows-release-check.yml：手动只读下载指定 Release 和成功 Windows run 的指定 Artifact，核对标签提交与产物归属、摘要，比较内层 EXE 并保留 JSON；不发布或安装。

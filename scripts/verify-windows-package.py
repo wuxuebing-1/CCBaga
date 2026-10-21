@@ -3,6 +3,7 @@
 # [OUTPUT]: Extracted-payload equality verification and SHA256SUMS.txt.
 # [POS]: Read-only installer acceptance; never installs, opens UI or changes registry.
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -69,6 +70,10 @@ def verify(directory):
                         raise SystemExit('Installer network Skill differs: ' + str(source.name))
         sums.append(digest(installer) + '  ' + installer.name)
     (directory / 'SHA256SUMS.txt').write_text('\n'.join(sums) + '\n', encoding='utf-8')
+    provenance = {key: os.environ.get(key) for key in
+                  ('GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_WORKFLOW_REF')}
+    provenance['installers'] = [{'name': p.name, 'size': p.stat().st_size, 'sha256': digest(p)} for p in installers]
+    (directory / 'build-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n', encoding='utf-8')
     print('Windows installer: host, complete browser bytes, dual UI and licenses verified.')
 
 if __name__ == '__main__':

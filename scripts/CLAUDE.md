@@ -31,3 +31,5 @@ package-windows.py：构建前核验固定 Windows 引擎完整清单、PE/版�
 test-windows-installer.py：实际编译并运行 NSIS 安装/卸载守卫（1024 字符限制），验证完整脚本、64 位 PowerShell、首装/占用/相邻进程以及中文、空格和单引号路径；可丢弃进程保持运行。
 
 Windows 安装验收同时按源文件字节核验随包 Windows 网络 Skill；资源清单排除 Python 临时缓存。
+
+compare-windows-release.py/test-windows-release-comparison.py：复用现有摘要函数，比较 Release EXE 与原始 CI ZIP 内唯一安装包，生成 JSON 与明确退出码；离线回归不执行程序。verify-windows-package.py 成功后记录 build-provenance.json。
